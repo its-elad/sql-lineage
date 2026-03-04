@@ -1,0 +1,26 @@
+{
+  "name": "@sql-lineage/lineage",
+  "version": "1.0.0",
+  "description": "",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "eslint": "^9.39.1",
+    "tsup": "^8.3.5"
+  },
+  "dependencies": {
+  }
+}
