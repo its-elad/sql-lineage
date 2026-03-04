@@ -15,12 +15,19 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "update:grammar:official": "mkdir -p grammar/trino-official && curl -L https://raw.githubusercontent.com/trinodb/trino/master/core/trino-grammar/src/main/antlr4/io/trino/grammar/sql/SqlBase.g4 -o grammar/trino-official/SqlBase.g4",
+    "update:grammar:antlr4": "mkdir -p grammar/antlr4 && curl -L https://raw.githubusercontent.com/antlr/grammars-v4/master/sql/trino/TrinoLexer.g4 -o grammar/antlr4/TrinoLexer.g4 && curl -L https://raw.githubusercontent.com/antlr/grammars-v4/master/sql/trino/TrinoParser.g4 -o grammar/antlr4/TrinoParser.g4",
+    "generate:official": "antlr-ng -Dlanguage=TypeScript -l true -v true -o generated/official grammar/trino-official/SqlBase.g4",
+    "generate:antlr4": "antlr-ng -Dlanguage=TypeScript -l true -v true -o generated/antlr4 grammar/antlr4/TrinoLexer.g4 grammar/antlr4/TrinoParser.g4"
   },
   "devDependencies": {
     "eslint": "^9.39.1",
     "tsup": "^8.3.5"
   },
   "dependencies": {
+    "antlr-ng": "^1.0.10",
+    "antlr4ng": "^3.0.16",
+    "dt-sql-parser": "^4.4.0"
   }
 }
