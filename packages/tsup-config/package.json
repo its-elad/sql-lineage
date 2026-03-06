@@ -1,5 +1,5 @@
 {
-  "name": "@studybuddy/tsup-config",
+  "name": "@sql-lineage/tsup-config",
   "version": "1.0.0",
   "description": "",
   "license": "ISC",
@@ -9,5 +9,8 @@
       "import": "./tsup.config.js",
       "require": "./tsup.config.js"
     }
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5"
   }
 }

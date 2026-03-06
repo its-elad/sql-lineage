@@ -1,5 +1,5 @@
 import { defineConfig } from "tsup";
-import config from "@studybuddy/tsup-config";
+import config from "@sql-lineage/tsup-config";
 
 export default defineConfig({
   ...config,

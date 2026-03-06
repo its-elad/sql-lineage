@@ -1,5 +1,5 @@
 {
-  "name": "demo",
+  "name": "@sql-lineage/demo",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -10,6 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@sql-lineage/lineage": "*",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
