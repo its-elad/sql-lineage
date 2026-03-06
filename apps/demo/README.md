@@ -22,7 +22,7 @@ npm install
 Start the development server:
 
 ```
-npx turbo dev --filter=demo
+npx turbo dev --filter=@sql-lineage/demo
 ```
 or
 ```

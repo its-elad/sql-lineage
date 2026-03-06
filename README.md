@@ -6,7 +6,7 @@ This monorepo is managed with Turborepo and contains tools for SQL lineage extra
 ## Monorepo Structure
 
 ### Apps
-- `demo`: Vite-based demo app for testing and showcasing SQL lineage features
+- `@sql-lineage/demo`: Vite-based demo app for testing and showcasing SQL lineage features
 
 ### Packages
 - `@sql-lineage/lineage`: TypeScript library for extracting column and table lineage from SQL queries (Trino SQL dialect, ANTLR4-based)
