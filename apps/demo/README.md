@@ -1,75 +1,64 @@
-# React + TypeScript + Vite
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+# Demo App: React + TypeScript + Vite
 
-Currently, two official plugins are available:
+This demo app showcases and tests SQL lineage extraction features from the `@sql-lineage/lineage` package. Built with React, TypeScript, and Vite, it provides an interactive UI for exploring SQL parsing and lineage results.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Features
+- Interactive SQL editor and lineage visualization
+- Hot Module Replacement (HMR) for fast development
+- TypeScript and ESLint integration
+- Uses official Vite React plugins ([Babel](https://babeljs.io/) or [SWC](https://swc.rs/))
 
-## React Compiler
+## Setup
 
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
+Install dependencies from the monorepo root:
 
-Note: This will impact Vite dev & build performances.
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Running the Demo
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Start the development server:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
 ```
+npx turbo dev --filter=demo
+```
+or
+```
+cd apps/demo
+npm run dev
+```
+
+Open [http://localhost:8080](http://localhost:8080) in your browser to view the app.
+
+## Building
+
+Build the demo app for production:
+
+```
+npx turbo build --filter=demo
+```
+or
+```
+cd apps/demo
+npm run build
+```
+
+## Testing
+
+Tests are managed at the package level. For lineage logic, see `@sql-lineage/lineage` tests.
+
+## ESLint & TypeScript
+
+The app uses shared ESLint and TypeScript configs from the monorepo. For production, consider enabling type-aware lint rules and React-specific plugins as described in the monorepo docs.
+
+## Useful Links
+- [Vite](https://vitejs.dev/)
+- [React](https://react.dev/)
+- [TypeScript](https://www.typescriptlang.org/)
+- [@sql-lineage/lineage](../../packages/lineage/README.md)
+
+---
+
+For advanced ESLint configuration, see the monorepo's `eslint-config` package and Vite docs.

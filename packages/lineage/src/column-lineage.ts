@@ -19,11 +19,16 @@ import {
   SubqueryRelationContext,
   ParenthesizedRelationContext,
   LateralContext,
+  UnnestContext,
+  TableFunctionInvocationContext,
+  TableFunctionCallContext,
+  TableArgumentTableContext,
+  TableArgumentQueryContext,
   ColumnReferenceContext,
   DereferenceContext,
   JoinCriteriaContext,
 } from "./generated/official/SqlBaseParser.js";
-import { parseSqlAntlr } from "./antlr4ng.js";
+import { parseSqlAntlr } from "./parser.js";
 import {
   getIdentifierText,
   normalizeId,
@@ -32,6 +37,7 @@ import {
   extractColumnName,
   NormalizedIdBrand,
 } from "./column-lineage.utils.js";
+import { HashSet } from "./hashset.js";
 
 // ════════════════════════════════════════════════════════════════
 // Public Types
@@ -50,6 +56,12 @@ export interface TableColumnLineage {
   columns: string[];
 }
 
+/** Column reference that could not be resolved to a known table. */
+export interface UnresolvedColumnReference {
+  table?: string;
+  column: string;
+}
+
 /** Full result returned by {@link getColumnLineage}. */
 export interface ColumnLineageResult {
   /** Columns successfully attributed to a source table in the metadata. */
@@ -62,7 +74,7 @@ export interface ColumnLineageResult {
    *  - `table` is absent when the reference could not be attributed to any table
    *    at all (truly unresolved).
    */
-  unresolvedTableColumns: { table?: string; column: string }[];
+  unresolvedTableColumns: UnresolvedColumnReference[];
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -78,7 +90,7 @@ export interface ColumnLineageResult {
  *                 (runtime-computed, anonymous except for its alias).
  * - `'unknown'` — a table referenced in the query but absent from the metadata.
  *
- * Only `'real'` entries go into `tableColumns`; `'unknown'` entries are emitted
+ * Only `'real'` entries go into `tableColumns`; `'unknown'` entries are reported
  * in `unresolvedTableColumns` with the `table` field set. `'cte'` and `'derived'`
  * entries participate in resolution only and are excluded from the output.
  */
@@ -100,6 +112,12 @@ interface ScopeTable {
 interface QueryScope {
   /** Maps normalised alias (or bare table name) → table info. */
   tables: Map<NormalizedIdBrand, ScopeTable>;
+}
+
+/** Scope tracking for WITH-clause CTE registrations. */
+interface CteScope {
+  /** Maps normalised CTE name → CTE descriptor. */
+  tables: Map<NormalizedIdBrand, ScopeTable & { kind: "cte" }>;
 }
 
 /** Accumulator for resolved column references per table. */
@@ -129,7 +147,11 @@ function buildMetadataLookup(metadata: TableMetadata[]): Map<NormalizedIdBrand, 
 }
 
 /** Creates a {@link ScopeTable} with a pre-built normalised column lookup map. */
-function createScopeTable(qualifiedName: string, columns: string[], kind: ScopeTableKind = "real"): ScopeTable {
+function createScopeTable<K extends ScopeTableKind = "real">(
+  qualifiedName: string,
+  columns: string[],
+  kind: K = "real" as K
+): ScopeTable & { kind: K } {
   const columnsByNormalized = new Map<NormalizedIdBrand, string>();
   for (const col of columns) {
     const key = normalizeId(col);
@@ -150,17 +172,17 @@ function createScopeTable(qualifiedName: string, columns: string[], kind: ScopeT
  *
  * Traversal strategy:
  *  1. {@link visitQuery} handles CTEs then delegates to the body.
- *  2. {@link processCtes} pushes a shared CTE scope onto the stack, registers
- *     each CTE as a {@link ScopeTable} with `isCte: true`, visits its body,
+ *  2. {@link processCtes} pushes a shared CTE scope onto the CTE stack, registers
+ *     each CTE as a {@link ScopeTable} with `kind: 'cte'`, visits its body,
  *     and leaves the scope live for the main query body. {@link visitQuery}
  *     pops it afterwards. This means CTE visibility is scoped correctly —
  *     inner WITH clauses cannot leak definitions to outer queries.
  *  3. {@link processTerm} / {@link processQueryNoWith} push a scope built
  *     from the FROM clause, visit all column-bearing clauses, then pop.
  *  4. {@link visitDereference} and {@link visitColumnReference} are the leaf
- *     resolvers — they look up columns in the scope stack.
+ *     resolvers — they look up columns in the query-scope stack.
  *  5. {@link visitSelectAll} expands `*` / `table.*` from metadata.
- *  6. Subqueries get their own scopes; outer scopes stay on the stack
+ *  6. Subqueries get their own scopes; outer query scopes stay on the stack
  *     so correlated references resolve correctly.
  *  7. CTE entries resolve during column lookup but are filtered out in
  *     {@link recordColumn} via `kind === 'cte'`, so only real tables appear in output.
@@ -169,11 +191,12 @@ function createScopeTable(qualifiedName: string, columns: string[], kind: ScopeT
  */
 class ColumnLineageVisitor extends SqlBaseVisitor<void> {
   private readonly metadataLookup: Map<NormalizedIdBrand, TableMetadata>;
-  private readonly scopeStack: QueryScope[] = [];
+  private readonly queryScopeStack: QueryScope[] = [];
+  private readonly cteScopeStack: CteScope[] = [];
   private readonly resultEntries = new Map<NormalizedIdBrand, ResultEntry>();
-  private readonly unresolvedColumns = new Set<NormalizedIdBrand>();
-  /** Dedup map for columns resolved to an unknown (non-metadata) table. */
-  private readonly unresolvedByTableMap = new Map<string, { table: string; column: string }>();
+  private readonly unresolvedColumns = new HashSet<{ table?: string; column: NormalizedIdBrand }>(
+    ({ table, column }) => `${table ?? ""}:${column}`
+  );
 
   constructor(metadata: TableMetadata[]) {
     super();
@@ -197,14 +220,13 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     }
     tableColumns.sort((a, b) => a.table.localeCompare(b.table));
 
-    const withTable = [...this.unresolvedByTableMap.values()].sort(
-      (a, b) => a.table.localeCompare(b.table) || a.column.localeCompare(b.column)
-    );
-    const withoutTable = [...this.unresolvedColumns].sort().map((col) => ({ column: col as string }));
-
     return {
       tableColumns,
-      unresolvedTableColumns: [...withTable, ...withoutTable],
+      unresolvedTableColumns: [...this.unresolvedColumns].sort((a, b) => {
+        const tableCompare = (a.table ?? "").localeCompare(b.table ?? "");
+        if (tableCompare !== 0) return tableCompare;
+        return a.column.localeCompare(b.column);
+      }),
     };
   }
 
@@ -243,7 +265,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       if (baseName && this.tryResolveAndRecordUnqualifiedColumn(baseName)) return;
 
       // 3. Truly unresolved — record the full dotted path
-      this.unresolvedColumns.add(normalizeId(columnParts.join(".")));
+      this.unresolvedColumns.add({ column: normalizeId(columnParts.join(".")) });
       return;
     }
 
@@ -275,7 +297,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
           }
         }
         if (!found) {
-          this.unresolvedColumns.add(normalizedColumn);
+          this.unresolvedColumns.add({ column: normalizedColumn });
         }
       }
     } else {
@@ -289,7 +311,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     if (withCtx) {
       this.processCtes(withCtx); // pushes the CTE scope
       this.processQueryNoWith(ctx.queryNoWith());
-      this.scopeStack.pop(); // pop the CTE scope
+      this.popCteScope(); // pop the CTE scope
     } else {
       this.processQueryNoWith(ctx.queryNoWith());
     }
@@ -315,11 +337,15 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
 
       const table = this.resolveTableFromScope(tableRef);
       if (table) {
-        for (const col of table.columns) {
-          if (col !== "*") this.recordColumn(table, col);
+        if (table.columns.length) {
+          for (const col of table.columns) {
+            if (col !== "*") this.recordColumn(table, col);
+          }
+        } else {
+          this.recordColumn(table, "*");
         }
       } else {
-        this.unresolvedColumns.add(normalizeId(`${tableRef}.*`));
+        this.unresolvedColumns.add({ column: normalizeId(`${tableRef}.*`) });
       }
     } else {
       // Bare * — expand every table in the current scope
@@ -328,8 +354,12 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
         const tableKey = normalizeId(table.qualifiedName);
         if (seen.has(tableKey)) continue;
         seen.add(tableKey);
-        for (const col of table.columns) {
-          if (col !== "*") this.recordColumn(table, col);
+        if (table.columns.length) {
+          for (const col of table.columns) {
+            if (col !== "*") this.recordColumn(table, col);
+          }
+        } else {
+          this.recordColumn(table, "*");
         }
       }
     }
@@ -343,8 +373,8 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     // Push a dedicated scope for all CTEs in this WITH clause.
     // Registering each CTE before visiting its body means chained CTEs can
     // reference earlier ones via normal scope resolution.
-    const cteScope: QueryScope = { tables: new Map() };
-    this.scopeStack.push(cteScope);
+    const cteScope: CteScope = { tables: new Map() };
+    this.pushCteScope(cteScope);
 
     for (const namedQuery of withCtx.namedQuery()) {
       const cteName = getIdentifierText(namedQuery.identifier());
@@ -354,7 +384,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
         ? colAliases.identifier().map(getIdentifierText)
         : this.inferQueryOutputColumns(namedQuery.query());
 
-      // Register with isCte=true before visiting the body so subsequent
+      // Register with kind='cte' before visiting the body so subsequent
       // CTEs in the same WITH clause can already reference this one.
       cteScope.tables.set(normalizeId(cteName), createScopeTable(cteName, cols, "cte"));
 
@@ -373,7 +403,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     }
 
     if (scopeWasPushed) {
-      this.scopeStack.pop();
+      this.popQueryScope();
     }
   }
 
@@ -388,11 +418,11 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       if (primary instanceof QueryPrimaryDefaultContext) {
         const spec = primary.querySpecification();
         const scope = this.buildScopeFromRelations(spec.relation());
-        this.scopeStack.push(scope);
+        this.pushQueryScope(scope);
 
         this.customVisitSpecInternals(spec);
 
-        // Visit FROM-clause subquery bodies (scope is now active)
+        // Visit FROM-clause subquery / UNNEST / TABLE() bodies (scope is now active)
         for (const rel of spec.relation()) {
           this.forEachAliasedRelation(rel, (aliased) => {
             const p = aliased.relationPrimary();
@@ -400,6 +430,12 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
               this.visit(p.query());
             } else if (p instanceof LateralContext) {
               this.visit(p.query());
+            } else if (p instanceof UnnestContext) {
+              for (const expr of p.expression()) {
+                this.visit(expr);
+              }
+            } else if (p instanceof TableFunctionInvocationContext) {
+              this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
             }
           });
         }
@@ -416,11 +452,11 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     if (term instanceof SetOperationContext) {
       if (term._left) {
         const pushed = this.processTerm(term._left);
-        if (pushed) this.scopeStack.pop();
+        if (pushed) this.popQueryScope();
       }
       if (term._right) {
         const pushed = this.processTerm(term._right);
-        if (pushed) this.scopeStack.pop();
+        if (pushed) this.popQueryScope();
       }
       return false;
     }
@@ -468,7 +504,23 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
   // ════════════════════════════════════════════════════════════
 
   private get currentScope(): QueryScope | undefined {
-    return this.scopeStack[this.scopeStack.length - 1];
+    return this.queryScopeStack[this.queryScopeStack.length - 1];
+  }
+
+  private pushQueryScope(scope: QueryScope): void {
+    this.queryScopeStack.push(scope);
+  }
+
+  private popQueryScope(): void {
+    this.queryScopeStack.pop();
+  }
+
+  private pushCteScope(scope: CteScope): void {
+    this.cteScopeStack.push(scope);
+  }
+
+  private popCteScope(): void {
+    this.cteScopeStack.pop();
   }
 
   /**
@@ -478,11 +530,12 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
    * - `'cte'` / `'derived'` → silently dropped (participate in resolution only).
    */
   private recordColumn(table: ScopeTable, column: string): { skipped: boolean } {
-    const originalColumnName = table.columnsByNormalized.get(normalizeId(column));
+    const normalizedColumn = normalizeId(column);
+    const originalColumnName = table.columnsByNormalized.get(normalizedColumn);
     if (table.kind === "unknown" || !originalColumnName) {
-      const key = `${normalizeId(table.qualifiedName)}:${normalizeId(column)}`;
-      if (!this.unresolvedByTableMap.has(key)) {
-        this.unresolvedByTableMap.set(key, { table: table.qualifiedName, column });
+      const unresolvedColumn = { table: table.qualifiedName, column: normalizedColumn };
+      if (!this.unresolvedColumns.has(unresolvedColumn)) {
+        this.unresolvedColumns.add(unresolvedColumn);
         return { skipped: false };
       }
     } else if (table.kind === "real") {
@@ -508,8 +561,8 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
    */
   private resolveTableFromScope(nameOrAlias: string): ScopeTable | undefined {
     const tableId = normalizeId(nameOrAlias);
-    for (let i = this.scopeStack.length - 1; i >= 0; i--) {
-      const scope = this.scopeStack[i];
+    for (let i = this.queryScopeStack.length - 1; i >= 0; i--) {
+      const scope = this.queryScopeStack[i];
       if (!scope) continue;
       const table = scope.tables.get(tableId);
       if (table) return table;
@@ -518,13 +571,15 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
   }
 
   /**
-   * Searches the scope stack for a CTE registration with the given normalised
+   * Searches the CTE scope stack for a CTE registration with the given normalised
    * name. Returns the {@link ScopeTable} only when `kind === 'cte'`, so a real
    * table that shadows a CTE name is never misidentified.
    */
   private resolveCteFromScope(normalizedName: NormalizedIdBrand): ScopeTable | undefined {
-    for (let i = this.scopeStack.length - 1; i >= 0; i--) {
-      const table = this.scopeStack[i]?.tables.get(normalizedName);
+    for (let i = this.cteScopeStack.length - 1; i >= 0; i--) {
+      const scope = this.cteScopeStack[i];
+      if (!scope) continue;
+      const table = scope.tables.get(normalizedName);
       if (table?.kind === "cte") return table;
     }
     return undefined;
@@ -536,7 +591,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
    */
   private recordUnqualifiedColumn(columnName: string): void {
     if (!this.tryResolveAndRecordUnqualifiedColumn(columnName)) {
-      this.unresolvedColumns.add(normalizeId(columnName));
+      this.unresolvedColumns.add({ column: normalizeId(columnName) });
     }
   }
 
@@ -618,8 +673,8 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
    */
   private tryResolveAndRecordUnqualifiedColumn(columnName: string): boolean {
     const normalized = normalizeId(columnName);
-    for (let i = this.scopeStack.length - 1; i >= 0; i--) {
-      const scope = this.scopeStack[i];
+    for (let i = this.queryScopeStack.length - 1; i >= 0; i--) {
+      const scope = this.queryScopeStack[i];
       if (!scope) continue;
 
       // Collect all *distinct* ScopeTable objects in this scope that own the column.
@@ -652,7 +707,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
 
       // Ambiguous — multiple distinct tables own this column in the same scope.
       // Trino would reject this query; report as unresolved.
-      this.unresolvedColumns.add(normalized);
+      this.unresolvedColumns.add({ column: normalized });
       return true;
     }
     return false;
@@ -758,8 +813,64 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       this.registerSubquerySource(primary.query(), alias, columnAliasCtx, scope);
     } else if (primary instanceof LateralContext) {
       this.registerSubquerySource(primary.query(), alias, columnAliasCtx, scope);
+    } else if (primary instanceof UnnestContext) {
+      if (alias) {
+        const columns = columnAliasCtx ? columnAliasCtx.identifier().map(getIdentifierText) : [];
+        scope.tables.set(normalizeId(alias), createScopeTable(alias, columns, "derived"));
+      }
+    } else if (primary instanceof TableFunctionInvocationContext) {
+      if (alias) {
+        const columns = columnAliasCtx ? columnAliasCtx.identifier().map(getIdentifierText) : [];
+        scope.tables.set(normalizeId(alias), createScopeTable(alias, columns, "derived"));
+      }
     }
-    // UNNEST / TABLE functions — not handled in this version
+  }
+
+  /**
+   * Visits the arguments of a `TABLE(tableFunctionCall)` invocation:
+   *  - `TABLE(tbl_name)` argument → resolve the table, push a temporary scope
+   *    containing only that table, visit its PARTITION BY / ORDER BY
+   *    expressions (so column refs are attributed to the table), then pop.
+   *  - `TABLE(query)` argument     → visit the inner query.
+   *  - Scalar `expression` argument → visit directly.
+   */
+  private customVisitTableFunctionCallArguments(ctx: TableFunctionCallContext): void {
+    for (const arg of ctx.tableFunctionArgument()) {
+      const tableArg = arg.tableArgument();
+      if (tableArg) {
+        const rel = tableArg.tableArgumentRelation();
+        if (rel instanceof TableArgumentTableContext) {
+          const rawName = getQualifiedNameParts(rel.qualifiedName()).join(".");
+          const normalizedName = normalizeId(rawName);
+          const source = this.resolveTableSource(normalizedName, rawName);
+          const scopeTable = createScopeTable(source.qualifiedName, source.columns, source.kind);
+
+          // Build a temporary scope so PARTITION BY / ORDER BY columns
+          // resolve against this argument table.
+          const tempScope: QueryScope = { tables: new Map() };
+          tempScope.tables.set(normalizedName, scopeTable);
+          const argAliasCtx = rel.identifier();
+          if (argAliasCtx) {
+            tempScope.tables.set(normalizeId(getIdentifierText(argAliasCtx)), scopeTable);
+          }
+          this.pushQueryScope(tempScope);
+
+          for (const expr of tableArg.expression()) {
+            this.visit(expr);
+          }
+          for (const item of tableArg.sortItem()) {
+            this.visit(item);
+          }
+
+          this.popQueryScope();
+        } else if (rel instanceof TableArgumentQueryContext) {
+          this.visit(rel.query());
+        }
+      } else {
+        const expr = arg.expression();
+        if (expr) this.visit(expr);
+      }
+    }
   }
 
   /** Registers a subquery (or LATERAL) source in the scope. */

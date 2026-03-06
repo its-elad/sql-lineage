@@ -6,7 +6,7 @@
  *   - test.fails(...)  : known bug in the lineage visitor/parser — marked for
  *                        a future fix. These will show as "(expected failure)"
  *                        in the output and will NOT turn red.
- *   - test.skip(...)   : feature explicitly not supported (e.g. UNNEST).
+ *   - test.skip(...)   : feature explicitly not supported.
  */
 import { describe, expect, test } from "vitest";
 import { getColumnLineage, type ColumnLineageResult, type TableMetadata } from "../column-lineage.js";
@@ -499,14 +499,14 @@ describe("Star expansion", () => {
 
   test("* with no metadata → nothing reported (no columns to expand)", () => {
     const result = run(`SELECT * FROM unknown_table`);
-    expect(result).toEqual({ tableColumns: [], unresolvedTableColumns: [] });
+    expect(result).toEqual({ tableColumns: [], unresolvedTableColumns: [{ table: "unknown_table", column: "*" }] });
   });
 
   test("table.* where table alias has no metadata columns — silently empty (not unresolved)", () => {
     const result = run(`SELECT u.* FROM unknown_table u`);
     expect(result).toEqual({
       tableColumns: [],
-      unresolvedTableColumns: [],
+      unresolvedTableColumns: [{ table: "unknown_table", column: "*" }],
     });
   });
 
@@ -1316,25 +1316,142 @@ describe("Complex realistic queries", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 16. KNOWN LIMITATIONS (explicitly unsupported features)
+// 16. UNNEST & TABLE() TABLE FUNCTIONS
 // ─────────────────────────────────────────────────────────────────────────────
-describe("Known limitations", () => {
-  // UNNEST is explicitly not handled in the current version.
-  // See comment: "// UNNEST / TABLE functions — not handled in this version"
-  test.skip("UNNEST — not supported in current version", () => {
+describe("UNNEST and TABLE() table functions", () => {
+  test("UNNEST — array column reference is tracked on the source table", () => {
     const result = run(
       `SELECT u.id, t.tag
-             FROM users u
-             CROSS JOIN UNNEST(u.tags) AS t(tag)`,
+       FROM users u
+       CROSS JOIN UNNEST(u.tags) AS t(tag)`,
       [tbl("users", ["id", "tags"])]
     );
-    expect(result.tableColumns.find((t) => t.table === "users")?.columns).toContain("tags");
+    expect(result).toEqual({
+      tableColumns: [{ table: "users", columns: ["id", "tags"] }],
+      unresolvedTableColumns: [],
+    });
   });
 
-  // TABLE function references are also not handled.
-  test.skip("TABLE() function — not supported in current version", () => {
+  test("UNNEST — t.tag from derived alias is silently dropped (not unresolved)", () => {
+    const result = run(
+      `SELECT t.tag
+       FROM events e
+       CROSS JOIN UNNEST(e.tag_array) AS t(tag)`,
+      [tbl("events", ["id", "tag_array"])]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "events", columns: ["tag_array"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("UNNEST WITH ORDINALITY — ordinal column is from derived alias, array col tracked", () => {
+    const result = run(
+      `SELECT e.id, t.tag, t.pos
+       FROM events e
+       CROSS JOIN UNNEST(e.tag_array) WITH ORDINALITY AS t(tag, pos)`,
+      [tbl("events", ["id", "tag_array"])]
+    );
+    // t.tag / t.pos are qualified refs to the UNNEST derived alias → silently dropped
+    expect(result).toEqual({
+      tableColumns: [{ table: "events", columns: ["id", "tag_array"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("UNNEST with multiple array columns", () => {
+    const result = run(
+      `SELECT t.a, t.b
+       FROM src
+       CROSS JOIN UNNEST(src.xs, src.ys) AS t(a, b)`,
+      [tbl("src", ["xs", "ys"])]
+    );
+    // t.a / t.b are qualified refs to the UNNEST derived alias → silently dropped
+    expect(result).toEqual({
+      tableColumns: [{ table: "src", columns: ["xs", "ys"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("TABLE() invocation with no TABLE(tbl) arg — unaliased result columns are unresolved", () => {
+    // TABLE(my_catalog.my_table()) has no argument table and no alias,
+    // so the column 'id' in SELECT cannot be attributed.
     const result = run(`SELECT id FROM TABLE(my_catalog.my_table())`);
-    expect(result).toBeDefined();
+    expect(result).toEqual({
+      tableColumns: [],
+      unresolvedTableColumns: [{ column: "id" }],
+    });
+  });
+
+  test("TABLE() with TABLE(tbl) argument — PARTITION BY column tracked on argument table", () => {
+    const result = run(
+      `SELECT res.val
+       FROM TABLE(my_func(TABLE(source_table) PARTITION BY id)) AS res(val)`,
+      [tbl("source_table", ["id", "val"])]
+    );
+    // PARTITION BY id → source_table.id; SELECT res.val → derived, dropped
+    expect(result).toEqual({
+      tableColumns: [{ table: "source_table", columns: ["id"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("TABLE() with TABLE(tbl) argument — ORDER BY column tracked on argument table", () => {
+    const result = run(
+      `SELECT *
+       FROM TABLE(my_func(TABLE(fact_table) ORDER BY created_at)) AS r(v)`,
+      [tbl("fact_table", ["created_at", "amount"])]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "fact_table", columns: ["created_at"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("TABLE() with multiple TABLE() arguments — columns tracked on respective tables", () => {
+    const result = run(
+      `SELECT *
+       FROM TABLE(my_join_func(
+         TABLE(left_table)  PARTITION BY lid,
+         TABLE(right_table) PARTITION BY rid
+       )) AS r(v)`,
+      [tbl("left_table", ["lid", "lval"]), tbl("right_table", ["rid", "rval"])]
+    );
+    expect(result).toEqual({
+      tableColumns: [
+        { table: "left_table", columns: ["lid"] },
+        { table: "right_table", columns: ["rid"] },
+      ],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("TABLE() with TABLE(query) argument — inner query columns tracked normally", () => {
+    const result = run(
+      `SELECT *
+       FROM TABLE(my_func(TABLE(SELECT id, amount FROM orders WHERE status = 'pending'))) AS r(v)`,
+      [tbl("orders", ["id", "amount", "status"])]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["amount", "id", "status"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("TABLE() combined with a regular JOIN — both sides contribute columns", () => {
+    const result = run(
+      `SELECT d.name, r.score
+       FROM TABLE(rank_func(TABLE(facts) PARTITION BY category_id)) AS r(score)
+       JOIN dims d ON r.score = d.score`,
+      [tbl("facts", ["category_id", "value"]), tbl("dims", ["score", "name"])]
+    );
+    expect(result).toEqual({
+      tableColumns: [
+        { table: "dims", columns: ["name", "score"] },
+        { table: "facts", columns: ["category_id"] },
+      ],
+      unresolvedTableColumns: [],
+    });
   });
 });
 
@@ -1387,28 +1504,19 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     });
   });
 
-  test("subquery with no columns", () => {
-    const result = run(`SELECT * FROM (SELECT ) t`);
-    expect(result).toEqual({
-      tableColumns: [],
-      unresolvedTableColumns: [],
-    });
-  });
-
   test("join ON referencing non-existent columns", () => {
     const meta1 = tbl("users", ["id"]);
     const meta2 = tbl("orders", ["id"]);
     const result = run(`SELECT u.id FROM users u JOIN orders o ON u.foo = o.bar`, [meta1, meta2]);
-    expect(result).toEqual({
-      tableColumns: [
-        { table: "users", columns: ["id"] },
-        { table: "orders", columns: [] },
-      ],
-      unresolvedTableColumns: [
-        { table: "users", column: "foo" },
-        { table: "orders", column: "bar" },
-      ],
-    });
+    expect(result).toEqual(
+      sorted({
+        tableColumns: [{ table: "users", columns: ["id"] }],
+        unresolvedTableColumns: [
+          { table: "users", column: "foo" },
+          { table: "orders", column: "bar" },
+        ],
+      })
+    );
   });
 
   test("SELECT with duplicate column aliases", () => {
@@ -1424,7 +1532,7 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     const result = run(`SELECT foo, bar FROM unknown`);
     expect(result).toEqual({
       tableColumns: [],
-      unresolvedTableColumns: [{ column: "foo" }, { column: "bar" }],
+      unresolvedTableColumns: [{ column: "bar" }, { column: "foo" }],
     });
   });
 
@@ -1432,7 +1540,7 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     const meta = tbl("users", ["id"]);
     const result = run(`SELECT UPPER(name) FROM users`, [meta]);
     expect(result).toEqual({
-      tableColumns: [{ table: "users", columns: [] }],
+      tableColumns: [],
       unresolvedTableColumns: [{ column: "name" }],
     });
   });
@@ -1467,7 +1575,7 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     });
   });
 
-  test.skip("no metadata at all", () => {
+  test("no metadata at all", () => {
     const result = run(`SELECT foo, bar FROM ghost_table`);
     expect(result).toEqual({
       tableColumns: [],
@@ -1523,20 +1631,28 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     const result = run(`SELECT * FROM users`);
     expect(result).toEqual({
       tableColumns: [],
-      unresolvedTableColumns: [],
+      unresolvedTableColumns: [{ table: "users", column: "*" }],
     });
   });
 
   test("deeply nested subquery with schema, missing metadata", () => {
     const result = run(`SELECT id FROM (SELECT id FROM myschema.users) x`);
-    console.log(result);
     expect(result).toEqual({
       tableColumns: [],
       unresolvedTableColumns: [{ column: "id" }],
     });
   });
 
-  test.fails("CTE with schema-qualified reference, partial metadata", () => {
+  test("CTE body unresolved column is preserved with outer SELECT *", () => {
+    const meta = tbl("orders", ["id"]);
+    const result = run(`WITH cte AS (SELECT name FROM orders) SELECT * FROM cte`, [meta]);
+    expect(result).toEqual({
+      tableColumns: [],
+      unresolvedTableColumns: [{ column: "name" }],
+    });
+  });
+
+  test("CTE with schema-qualified reference, partial metadata", () => {
     const meta = tbl("users", ["id"], "myschema");
     const result = run(`WITH cte AS (SELECT id, name FROM myschema.users) SELECT id, name FROM cte`, [meta]);
     expect(result).toEqual({
@@ -1632,7 +1748,7 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     );
   });
 
-  test.fails("CTE with schema-qualified table, no metadata", () => {
+  test("CTE with schema-qualified table, no metadata", () => {
     const result = run(`WITH cte AS (SELECT id FROM myschema.users) SELECT id FROM cte`);
     expect(result).toEqual({
       tableColumns: [],

@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
-import Editor from "@monaco-editor/react";
-import { parseSqlAntlr, serializeParseTreeAntlr, getColumnLineage, type TableMetadata } from "@sql-lineage/lineage";
+import Editor, { type EditorProps } from "@monaco-editor/react";
+import { getColumnLineage, getUpstreamTables, type TableMetadata } from "@sql-lineage/lineage";
 import "./App.css";
 
 const DEFAULT_SQL = `WITH order_summary AS (
@@ -56,25 +56,17 @@ const DEFAULT_NAMESPACE_METADATA: TableMetadata[] = [
   { tableName: "suppliers", columns: ["supplier_id", "supplier_name", "country", "status"] },
 ];
 
-/** Stub: replace with real lineage extraction once implemented */
-function computeLineage(...params: Parameters<typeof getColumnLineage>): unknown {
+function computeLineage(
+  ...params: Parameters<typeof getColumnLineage>
+): { columns: unknown; tables: unknown } | string {
   try {
-    return getColumnLineage(...params);
+    return { tables: getUpstreamTables(params[0]), columns: getColumnLineage(...params) };
   } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e) };
+    return e instanceof Error ? e.message : String(e);
   }
 }
 
-function safeSerialize(sql: string): string {
-  try {
-    const tree = parseSqlAntlr(sql);
-    return JSON.stringify(serializeParseTreeAntlr(tree), null, 2);
-  } catch (e) {
-    return String(e);
-  }
-}
-
-const EDITOR_OPTIONS = {
+const EDITOR_OPTIONS: EditorProps["options"] = {
   minimap: { enabled: false },
   scrollBeyondLastLine: false,
   fontSize: 13,

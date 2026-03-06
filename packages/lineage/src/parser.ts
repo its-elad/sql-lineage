@@ -8,7 +8,7 @@ export interface ParseTreeNodeAntlr {
   text?: string;
   children?: ParseTreeNodeAntlr[];
 }
-class AntlrParseError extends Error {
+export class AntlrParseError extends Error {
   offendingSymbol: antlr.Token | null;
   line: number;
   column: number;

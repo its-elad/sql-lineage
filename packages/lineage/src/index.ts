@@ -1,2 +1,3 @@
-export * from "./antlr4ng";
+export * from "./parser";
 export * from "./column-lineage";
+export * from "./upstream-tables";
