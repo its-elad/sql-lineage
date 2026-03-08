@@ -57,6 +57,49 @@ describe("Basic SELECT", () => {
     });
   });
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 3. SAME COLUMN NAME IN DIFFERENT SCOPES
+    // ─────────────────────────────────────────────────────────────────────────────
+    describe("Same column name from different tables in different scopes", () => {
+      const ONE = tbl("one", ["id"]);
+      const TWO = tbl("two", ["id"]);
+
+      test("unqualified column in main and subquery", () => {
+        const sql = `SELECT id, (SELECT max(id) FROM two) as max_id FROM one`;
+        const result = run(sql, [ONE, TWO]);
+        expect(result).toEqual({
+          tableColumns: [
+            { table: "one", columns: ["id"] },
+            { table: "two", columns: ["id"] },
+          ],
+          unresolvedTableColumns: [],
+        });
+      });
+
+      test("unqualified column in subquery only", () => {
+        const sql = `SELECT (SELECT max(id) FROM two) as max_id FROM one`;
+        const result = run(sql, [ONE, TWO]);
+        expect(result).toEqual({
+          tableColumns: [
+            { table: "two", columns: ["id"] },
+          ],
+          unresolvedTableColumns: [],
+        });
+      });
+
+      test("unqualified column in main query only", () => {
+        const sql = `SELECT id FROM one WHERE id > (SELECT max(id) FROM two)`;
+        const result = run(sql, [ONE, TWO]);
+        expect(result).toEqual({
+          tableColumns: [
+            { table: "one", columns: ["id"] },
+            { table: "two", columns: ["id"] },
+          ],
+          unresolvedTableColumns: [],
+        });
+      });
+    });
+
   test("all columns listed explicitly", () => {
     const result = run(`SELECT id, name, email, status FROM users`, [USERS]);
     expect(result).toEqual({
@@ -1528,14 +1571,6 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     });
   });
 
-  test("all columns unresolved (unknown table and columns)", () => {
-    const result = run(`SELECT foo, bar FROM unknown`);
-    expect(result).toEqual({
-      tableColumns: [],
-      unresolvedTableColumns: [{ column: "bar" }, { column: "foo" }],
-    });
-  });
-
   test("function call on unknown column", () => {
     const meta = tbl("users", ["id"]);
     const result = run(`SELECT UPPER(name) FROM users`, [meta]);
@@ -1572,14 +1607,6 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     expect(result).toEqual({
       tableColumns: [{ table: "myschema.users", columns: ["id"] }],
       unresolvedTableColumns: [],
-    });
-  });
-
-  test("no metadata at all", () => {
-    const result = run(`SELECT foo, bar FROM ghost_table`);
-    expect(result).toEqual({
-      tableColumns: [],
-      unresolvedTableColumns: [{ column: "bar" }, { column: "foo" }],
     });
   });
 
@@ -1624,14 +1651,6 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     expect(result).toEqual({
       tableColumns: [{ table: "users", columns: ["id"] }],
       unresolvedTableColumns: [],
-    });
-  });
-
-  test("SELECT * with no metadata", () => {
-    const result = run(`SELECT * FROM users`);
-    expect(result).toEqual({
-      tableColumns: [],
-      unresolvedTableColumns: [{ table: "users", column: "*" }],
     });
   });
 

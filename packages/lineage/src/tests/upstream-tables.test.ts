@@ -40,10 +40,32 @@ describe("Simple queries", () => {
     expect(getUpstreamTables(`SELECT * FROM myschema.orders`)).toEqual(["myschema.orders"]);
   });
 
-  test("result is sorted alphabetically", () => {
+  test("no FROM clause — returns empty array", () => {
+    expect(getUpstreamTables(`SELECT 1`)).toEqual([]);
+  });
+
+  test("VALUES in FROM — no real table, returns empty array", () => {
     expect(
-      getUpstreamTables(`SELECT * FROM zebra, alpha, middle`)
-    ).toEqual(["alpha", "middle", "zebra"]);
+      getUpstreamTables(`SELECT * FROM (VALUES (1, 'a'), (2, 'b')) t(id, name)`)
+    ).toEqual([]);
+  });
+
+  test("implicit comma join — all tables captured", () => {
+    expect(
+      getUpstreamTables(`SELECT a.id, b.name FROM users a, orders b WHERE a.id = b.user_id`)
+    ).toEqual(["orders", "users"]);
+  });
+
+  test("three-part catalog.schema.table name is preserved as-is", () => {
+    expect(
+      getUpstreamTables(`SELECT id FROM mycatalog.myschema.orders`)
+    ).toEqual(["mycatalog.myschema.orders"]);
+  });
+
+  test("quoted identifier with spaces is captured correctly", () => {
+    expect(
+      getUpstreamTables(`SELECT id FROM \"my weird table\"`)
+    ).toEqual(["my weird table"]);
   });
 });
 
@@ -87,6 +109,27 @@ describe("Subqueries", () => {
         FROM users
       `)
     ).toEqual(["orders", "users"]);
+  });
+
+  test("LATERAL subquery — inner table is captured", () => {
+    expect(
+      getUpstreamTables(`
+        SELECT u.id, l.total
+        FROM users u,
+        LATERAL (SELECT SUM(amount) AS total FROM orders WHERE user_id = u.id) l
+      `)
+    ).toEqual(["orders", "users"]);
+  });
+
+  test("subquery in HAVING — inner table captured", () => {
+    expect(
+      getUpstreamTables(`
+        SELECT user_id, COUNT(*)
+        FROM orders
+        GROUP BY user_id
+        HAVING COUNT(*) > (SELECT AVG(cnt) FROM stats)
+      `)
+    ).toEqual(["orders", "stats"]);
   });
 });
 
@@ -165,6 +208,53 @@ describe("CTEs", () => {
         SELECT * FROM orders
       `)
     ).toEqual(["myschema.orders"]);
+  });
+
+  test("RECURSIVE CTE — CTE name excluded, underlying tables returned", () => {
+    expect(
+      getUpstreamTables(`
+        WITH RECURSIVE tree AS (
+          SELECT id, parent_id FROM categories WHERE parent_id IS NULL
+          UNION ALL
+          SELECT c.id, c.parent_id FROM categories c JOIN tree ON c.parent_id = tree.id
+        )
+        SELECT id FROM tree
+      `)
+    ).toEqual(["categories"]);
+  });
+
+  test("CTE body containing UNION — tables from both branches captured", () => {
+    expect(
+      getUpstreamTables(`
+        WITH everybody AS (
+          SELECT id, name FROM users
+          UNION ALL
+          SELECT id, name FROM employees
+        )
+        SELECT * FROM everybody
+      `)
+    ).toEqual(["employees", "users"]);
+  });
+
+  test("CTE defined but never referenced in outer query — inner table still captured", () => {
+    // The visitor descends into all CTE bodies regardless of usage
+    expect(
+      getUpstreamTables(`
+        WITH unused AS (SELECT id FROM products)
+        SELECT id FROM users
+      `)
+    ).toEqual(["products", "users"]);
+  });
+
+  test("same table appears in both a CTE body and the outer query — deduplicated", () => {
+    expect(
+      getUpstreamTables(`
+        WITH cte AS (SELECT id FROM users WHERE status = 'active')
+        SELECT u.name
+        FROM cte
+        JOIN users u ON cte.id = u.id
+      `)
+    ).toEqual(["users"]);
   });
 });
 
@@ -289,6 +379,14 @@ describe("UNNEST and TABLE() table functions", () => {
     ).toEqual(["dim_table", "fact_table"]);
   });
 });
+  test("TABLE() with TABLE(SELECT ...) inline query argument — inner table captured", () => {
+    expect(
+      getUpstreamTables(`
+        SELECT *
+        FROM TABLE(my_func(TABLE(SELECT id, amount FROM orders WHERE status = 'pending'))) AS r(v)
+      `)
+    ).toEqual(["orders"]);
+  });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. CASE INSENSITIVITY & CASING
@@ -305,3 +403,4 @@ describe("Case insensitivity", () => {
     expect(result).toEqual(["MyTable"]);
   });
 });
+

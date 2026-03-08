@@ -6,7 +6,7 @@ import {
   WithContext,
 } from "./generated/official/SqlBaseParser.js";
 import { parseSqlAntlr } from "./parser.js";
-import { getIdentifierText, getQualifiedNameParts, normalizeId } from "./column-lineage.utils.js";
+import { getIdentifierText, getQualifiedNameParts, normalizeId } from "./utils.js";
 
 // ════════════════════════════════════════════════════════════════
 // Upstream Tables Visitor

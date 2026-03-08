@@ -6,19 +6,27 @@ This monorepo is managed with Turborepo and contains tools for SQL lineage extra
 ## Monorepo Structure
 
 ### Apps
-- `@sql-lineage/demo`: Vite-based demo app for testing and showcasing SQL lineage features
+
+| App | Description |
+|---|---|
+| [`@sql-lineage/demo`](apps/demo) | Vite-based demo app for testing and showcasing SQL lineage features |
 
 ### Packages
-- `@sql-lineage/lineage`: TypeScript library for extracting column and table lineage from SQL queries (Trino SQL dialect, ANTLR4-based)
-- `@sql-lineage/eslint-config`: Shared ESLint configuration (includes Next.js and Prettier configs)
-- `@sql-lineage/typescript-config`: Shared TypeScript configuration files
 
-## Features
-- SQL lineage extraction (column/table)
-- Trino SQL grammar support (ANTLR4)
-- Demo app for interactive testing
-- Shared ESLint and TypeScript configs
-- Modular, TypeScript-first codebase
+| Package | Description |
+|---|---|
+| [`@sql-lineage/lineage`](packages/lineage/README.md) | TypeScript library for extracting column and table lineage from Trino SQL queries (ANTLR4-based) — see [package README](packages/lineage/README.md) |
+| [`@sql-lineage/eslint-config`](packages/eslint-config) | Shared ESLint configuration (includes Next.js and Prettier configs) |
+| [`@sql-lineage/typescript-config`](packages/typescript-config) | Shared TypeScript configuration files |
+
+## What the lineage library does
+
+`@sql-lineage/lineage` statically analyses a Trino SQL statement and answers two questions:
+
+- **Which physical tables does this query read from?** (`getUpstreamTables`) — returns a sorted, de-duplicated list of real table names, excluding CTEs and derived tables.
+- **Which columns from each table are actually used?** (`getColumnLineage`) — tracks every column reference across the full query (SELECT, WHERE, JOIN, GROUP BY, HAVING, ORDER BY, window functions) and maps each one back to its source table.
+
+See the [full API and logic documentation](packages/lineage/README.md) for details.
 
 ## Quick Start
 
