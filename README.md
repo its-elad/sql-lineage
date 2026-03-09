@@ -21,6 +21,8 @@ This monorepo is managed with Turborepo and contains tools for SQL lineage extra
 
 ## What the lineage library does
 
+> **Supported dialect:** [Trino](https://trino.io/) SQL, parsed via the [official Trino ANTLR4 grammar](https://github.com/trinodb/trino/blob/master/core/trino-grammar/src/main/antlr4/io/trino/grammar/sql/SqlBase.g4) from Trino's source code.
+
 `@sql-lineage/core` statically analyses a Trino SQL statement and answers two questions:
 
 - **Which physical tables does this query read from?** (`getUpstreamTables`) — returns a sorted, de-duplicated list of real table names, excluding CTEs and derived tables.
