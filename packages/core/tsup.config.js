@@ -5,4 +5,6 @@ export default defineConfig({
   ...config,
   dts: true,
   entry: ["src/index.ts"],
+  splitting: false,
+  treeshake: true,
 });

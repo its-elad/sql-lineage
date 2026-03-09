@@ -1,15 +1,30 @@
 {
   "name": "@sql-lineage/core",
   "version": "1.0.0",
-  "description": "",
+  "description": "Extract column and table lineage from Trino SQL queries using the official Trino ANTLR4 grammar",
+  "license": "MIT",
+  "keywords": ["sql", "lineage", "trino", "column-lineage", "sql-parser", "antlr4", "data-lineage"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/its-elad/sql-lineage.git",
+    "directory": "packages/core"
+  },
+  "trinoGrammarVersion": "479",
+  "sideEffects": false,
+  "files": ["dist", "README.md", "package.json", "LICENSE"],
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "require": "./dist/index.js",
-      "import": "./dist/index.mjs"
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
     }
   },
   "scripts": {
@@ -18,18 +33,18 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "update:grammar:official": "mkdir -p grammar/trino-official && curl -L https://raw.githubusercontent.com/trinodb/trino/master/core/trino-grammar/src/main/antlr4/io/trino/grammar/sql/SqlBase.g4 -o grammar/trino-official/SqlBase.g4",
-    "update:grammar:antlr4": "mkdir -p grammar/antlr4 && curl -L https://raw.githubusercontent.com/antlr/grammars-v4/master/sql/trino/TrinoLexer.g4 -o grammar/antlr4/TrinoLexer.g4 && curl -L https://raw.githubusercontent.com/antlr/grammars-v4/master/sql/trino/TrinoParser.g4 -o grammar/antlr4/TrinoParser.g4",
+    "update:grammar:official": "node scripts/update-grammar.mjs",
     "generate:official": "antlr-ng -Dlanguage=TypeScript -l true -v true -o generated/official grammar/trino-official/SqlBase.g4",
+    "update:grammar:antlr4": "mkdir -p grammar/antlr4 && curl -L https://raw.githubusercontent.com/antlr/grammars-v4/master/sql/trino/TrinoLexer.g4 -o grammar/antlr4/TrinoLexer.g4 && curl -L https://raw.githubusercontent.com/antlr/grammars-v4/master/sql/trino/TrinoParser.g4 -o grammar/antlr4/TrinoParser.g4",
     "generate:antlr4": "antlr-ng -Dlanguage=TypeScript -l true -v true -o generated/antlr4 grammar/antlr4/TrinoLexer.g4 grammar/antlr4/TrinoParser.g4"
   },
   "devDependencies": {
+    "antlr-ng": "^1.0.10",
     "eslint": "^9.39.1",
     "tsup": "^8.3.5",
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "antlr-ng": "^1.0.10",
     "antlr4ng": "^3.0.16"
   }
 }
