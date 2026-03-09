@@ -1,6 +1,6 @@
 # Internal Logic
 
-This document describes the internal implementation of `@sql-lineage/lineage`.
+This document describes the internal implementation of `@sql-lineage/core`.
 
 ## Parsing
 

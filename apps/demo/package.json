@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
-    "@sql-lineage/lineage": "*",
+    "@sql-lineage/core": "*",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

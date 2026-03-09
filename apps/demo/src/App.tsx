@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import Editor, { type EditorProps } from "@monaco-editor/react";
-import { getColumnLineage, getUpstreamTables, type TableMetadata } from "@sql-lineage/lineage";
+import { getColumnLineage, getUpstreamTables, type TableMetadata } from "@sql-lineage/core";
 import "./App.css";
 
 const DEFAULT_SQL = `WITH order_summary AS (
@@ -8,6 +8,7 @@ const DEFAULT_SQL = `WITH order_summary AS (
     o.order_id,
     o.customer_id,
     o.status,
+    oi.product_id,
     SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) AS order_total,
     COUNT(oi.product_id) AS item_count,
     (SELECT MAX(price) FROM products WHERE category = p.category) AS max_category_price

@@ -1,4 +1,4 @@
-# @sql-lineage/lineage
+# @sql-lineage/core
 
 A TypeScript library for extracting column and table lineage from Trino SQL queries. Built on the official Trino ANTLR4 grammar, it statically analyses SQL to determine exactly which physical tables and columns a query depends on.
 
@@ -13,7 +13,7 @@ A TypeScript library for extracting column and table lineage from Trino SQL quer
 ## Installation
 
 ```
-npm install @sql-lineage/lineage
+npm install @sql-lineage/core
 ```
 
 ## API
@@ -21,7 +21,7 @@ npm install @sql-lineage/lineage
 ### `getUpstreamTables(sql)`
 
 ```typescript
-import { getUpstreamTables } from '@sql-lineage/lineage';
+import { getUpstreamTables } from '@sql-lineage/core';
 
 getUpstreamTables(`
   WITH recent AS (SELECT * FROM orders WHERE created_at > now() - interval '7' day)
@@ -44,7 +44,7 @@ Returns a **sorted, de-duplicated** array of real upstream table names.
 ### `getColumnLineage(sql, metadata)`
 
 ```typescript
-import { getColumnLineage } from '@sql-lineage/lineage';
+import { getColumnLineage } from '@sql-lineage/core';
 
 const metadata = [
   { tableName: 'users',  columns: ['id', 'name', 'email', 'status'] },
@@ -133,7 +133,7 @@ To download and regenerate the latest grammar files run:
 ## Testing
 
 ```
-npm -w @sql-lineage/lineage run test
+npm -w @sql-lineage/core run test
 ```
 
 Test files are in `src/tests/`.

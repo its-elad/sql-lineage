@@ -1,7 +1,7 @@
 
 # Demo App: React + TypeScript + Vite
 
-This demo app showcases and tests SQL lineage extraction features from the `@sql-lineage/lineage` package. Built with React, TypeScript, and Vite, it provides an interactive UI for exploring SQL parsing and lineage results.
+This demo app showcases and tests SQL lineage extraction features from the `@sql-lineage/core` package. Built with React, TypeScript, and Vite, it provides an interactive UI for exploring SQL parsing and lineage results.
 
 ## Features
 - Interactive SQL editor and lineage visualization
@@ -47,7 +47,7 @@ npm run build
 
 ## Testing
 
-Tests are managed at the package level. For lineage logic, see `@sql-lineage/lineage` tests.
+Tests are managed at the package level. For lineage logic, see `@sql-lineage/core` tests.
 
 ## ESLint & TypeScript
 
@@ -57,7 +57,7 @@ The app uses shared ESLint and TypeScript configs from the monorepo. For product
 - [Vite](https://vitejs.dev/)
 - [React](https://react.dev/)
 - [TypeScript](https://www.typescriptlang.org/)
-- [@sql-lineage/lineage](../../packages/lineage/README.md)
+- [@sql-lineage/core](../../packages/lineage/README.md)
 
 ---
 

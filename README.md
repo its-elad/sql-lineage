@@ -15,13 +15,13 @@ This monorepo is managed with Turborepo and contains tools for SQL lineage extra
 
 | Package | Description |
 |---|---|
-| [`@sql-lineage/lineage`](packages/lineage/README.md) | TypeScript library for extracting column and table lineage from Trino SQL queries (ANTLR4-based) — see [package README](packages/lineage/README.md) |
+| [`@sql-lineage/core`](packages/lineage/README.md) | TypeScript library for extracting column and table lineage from Trino SQL queries (ANTLR4-based) — see [package README](packages/lineage/README.md) |
 | [`@sql-lineage/eslint-config`](packages/eslint-config) | Shared ESLint configuration (includes Next.js and Prettier configs) |
 | [`@sql-lineage/typescript-config`](packages/typescript-config) | Shared TypeScript configuration files |
 
 ## What the lineage library does
 
-`@sql-lineage/lineage` statically analyses a Trino SQL statement and answers two questions:
+`@sql-lineage/core` statically analyses a Trino SQL statement and answers two questions:
 
 - **Which physical tables does this query read from?** (`getUpstreamTables`) — returns a sorted, de-duplicated list of real table names, excluding CTEs and derived tables.
 - **Which columns from each table are actually used?** (`getColumnLineage`) — tracks every column reference across the full query (SELECT, WHERE, JOIN, GROUP BY, HAVING, ORDER BY, window functions) and maps each one back to its source table.
@@ -49,7 +49,7 @@ npx turbo build
 To build a specific package/app:
 
 ```
-npx turbo build --filter=@sql-lineage/lineage
+npx turbo build --filter=@sql-lineage/core
 npx turbo build --filter=demo
 ```
 
@@ -72,7 +72,7 @@ npx turbo dev --filter=demo
 To run tests for the lineage package:
 
 ```
-npm -w @sql-lineage/lineage run test
+npm -w @sql-lineage/core run test
 ```
 
 ## Remote Caching
