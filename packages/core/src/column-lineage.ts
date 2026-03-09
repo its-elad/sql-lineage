@@ -611,6 +611,9 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
    * - `'cte'` / `'derived'` → silently dropped (`{ skipped: true }`)
    */
   private recordColumn(table: ScopeTable, column: string): { skipped: boolean } {
+    if (table.kind !== "real" && table.kind !== "unknown") {
+      return { skipped: true };
+    }
     const normalizedColumn = normalizeId(column);
     const originalColumnName = table.columnsByNormalized.get(normalizedColumn);
     if (table.kind === "unknown" || !originalColumnName) {
@@ -629,6 +632,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       entry.columns.add(originalColumnName);
       return { skipped: false };
     }
+
     return { skipped: true };
   }
 
