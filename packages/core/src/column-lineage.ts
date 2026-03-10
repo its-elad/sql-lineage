@@ -36,6 +36,7 @@ import {
   OrdinalityColumnContext,
   ValueColumnContext,
   QueryColumnContext,
+  GroupingOperationContext,
 } from "./generated/official/SqlBaseParser.js";
 import { parseSqlAntlr } from "./parser.js";
 import {
@@ -367,6 +368,21 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       }
     } else {
       this.visitChildren(ctx);
+    }
+  };
+
+  /** Resolves GROUPING(col, ...) arguments as normal column references. */
+  visitGroupingOperation = (ctx: GroupingOperationContext): void => {
+    for (const qualifiedName of ctx.qualifiedName()) {
+      const parts = getQualifiedNameParts(qualifiedName);
+      if (parts.length === 0) continue;
+      if (parts.length === 1) {
+        this.recordUnqualifiedColumn(parts[0]!);
+        continue;
+      }
+      if (!this.tryResolveAndRecordQualifiedColumn(parts)) {
+        this.unresolvedColumns.add({ column: normalizeId(parts.join(".")) });
+      }
     }
   };
 

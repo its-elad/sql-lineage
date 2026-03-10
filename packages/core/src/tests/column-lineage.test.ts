@@ -411,6 +411,48 @@ describe("Filtering & aggregation", () => {
     });
   });
 
+  test("GROUPING SETS — grouped columns tracked across sets", () => {
+    const result = run(
+      `SELECT SUM(amount) AS total
+             FROM orders
+             GROUP BY GROUPING SETS ((user_id), (status), ())`,
+      [ORDERS]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["amount", "status", "user_id"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("ROLLUP — rollup dimensions are tracked", () => {
+    const result = run(`SELECT SUM(amount) FROM orders GROUP BY ROLLUP (user_id, status)`, [ORDERS]);
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["amount", "status", "user_id"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("CUBE — cube dimensions are tracked", () => {
+    const result = run(`SELECT SUM(amount) FROM orders GROUP BY CUBE (user_id, status)`, [ORDERS]);
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["amount", "status", "user_id"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("GROUPING(...) operation arguments are tracked", () => {
+    const result = run(
+      `SELECT GROUPING(o.user_id, o.status) AS g, SUM(o.amount)
+             FROM orders o
+             GROUP BY CUBE (o.user_id, o.status)`,
+      [ORDERS]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["amount", "status", "user_id"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
   test("HAVING — column in HAVING tracked", () => {
     const result = run(
       `SELECT user_id, SUM(amount) as total
@@ -871,6 +913,54 @@ describe("Window functions", () => {
     });
   });
 
+  test("window frame RANGE BETWEEN — frame clause columns tracked", () => {
+    const result = run(
+      `SELECT id, amount,
+                 SUM(amount) OVER (
+                   ORDER BY amount
+                   RANGE BETWEEN 10 PRECEDING AND CURRENT ROW
+                 ) AS ranged_total
+             FROM orders`,
+      [ORDERS]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["amount", "id"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("window frame GROUPS BETWEEN — frame clause columns tracked", () => {
+    const result = run(
+      `SELECT id, amount,
+                 SUM(amount) OVER (
+                   ORDER BY created_at
+                   GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+                 ) AS grouped_total
+             FROM orders`,
+      [ORDERS]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["amount", "created_at", "id"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("window frame bound expression can reference a column", () => {
+    const result = run(
+      `SELECT id, quantity,
+                 SUM(price) OVER (
+                   ORDER BY id
+                   ROWS BETWEEN quantity PRECEDING AND CURRENT ROW
+                 ) AS moving_total
+             FROM order_items`,
+      [ORDER_ITEMS]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "order_items", columns: ["id", "price", "quantity"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
   test("multiple window functions with different OVER clauses", () => {
     const result = run(
       `SELECT
@@ -1137,20 +1227,6 @@ describe("Same-name columns from multiple tables", () => {
     expect(result.tableColumns.find((t) => t.table === "users")?.columns).toContain("id");
     expect(result.tableColumns.find((t) => t.table === "orders")?.columns).toContain("id");
     expect(result.tableColumns.find((t) => t.table === "payments")?.columns).toContain("id");
-  });
-
-  test("qualified same-name column in WHERE ON tracked on the correct tables", () => {
-    // ON condition uses qualified refs; already covered by join tests, but
-    // this confirms same-name columns in ON are correctly attributed.
-    const result = run(`SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id WHERE o.status = 'paid'`, [
-      USERS,
-      ORDERS,
-    ]);
-    expect(result.tableColumns.find((t) => t.table === "users")?.columns).toContain("id");
-    expect(result.tableColumns.find((t) => t.table === "orders")?.columns).toContain("user_id");
-    expect(result.tableColumns.find((t) => t.table === "orders")?.columns).toContain("status");
-    // users.status should NOT be recorded (the WHERE ref was qualified as o.status)
-    expect(result.tableColumns.find((t) => t.table === "users")?.columns).not.toContain("status");
   });
 
   // ── Unqualified references — Trino rejects these as ambiguous ──────────
@@ -1754,6 +1830,15 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     });
   });
 
+  test("schema-qualified SQL does not match metadata with namespace.schema prefix", () => {
+    const meta = tbl("users", ["id", "name"], "namespaceName.schemaName");
+    const result = run(`SELECT u.id FROM schemaName.users u`, [meta]);
+    expect(result).toEqual({
+      tableColumns: [],
+      unresolvedTableColumns: [{ table: "schemaName.users", column: "id" }],
+    });
+  });
+
   test("partial metadata: missing columns", () => {
     const meta = tbl("users", ["id"]);
     const result = run(`SELECT id, name FROM users`, [meta]);
@@ -1830,15 +1915,6 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     expect(result).toEqual({
       tableColumns: [{ table: "myschema.users", columns: ["id", "weird name"] }],
       unresolvedTableColumns: [],
-    });
-  });
-
-  test("schema in query, metadata with different schema", () => {
-    const meta = tbl("users", ["id", "name"], "otherschema");
-    const result = run(`SELECT id FROM myschema.users`, [meta]);
-    expect(result).toEqual({
-      tableColumns: [],
-      unresolvedTableColumns: [{ column: "id" }],
     });
   });
 
