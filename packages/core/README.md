@@ -2,7 +2,9 @@
 
 A TypeScript library for extracting column and table lineage from Trino SQL queries. Built on the official Trino ANTLR4 grammar, it statically analyses SQL to determine exactly which physical tables and columns a query depends on.
 
-> **Supported dialect:** [Trino](https://trino.io/) SQL, parsed via the [official Trino ANTLR4 grammar](https://github.com/trinodb/trino/blob/master/core/trino-grammar/src/main/antlr4/io/trino/grammar/sql/SqlBase.g4) from Trino's source code. The pinned version used to generate the bundled parser is set via `trinoGrammarVersion` in `package.json`.
+> **Supported dialect:** [Trino](https://trino.io/) SQL, parsed via the [official Trino ANTLR4 grammar](https://github.com/trinodb/trino/blob/master/core/trino-grammar/src/main/antlr4/io/trino/grammar/sql/SqlBase.g4) from Trino's source code.
+
+> **The current grammar was taken from Trino 479** - Don't forget to update this line when updating the grammar and regenerating antlr4
 
 ## Features
 
@@ -129,7 +131,7 @@ For a detailed walkthrough of the parsing pipeline, scope model, traversal order
 The grammar files are in `grammar/` and the generated parser code in `src/generated/official/`.
 
 To download and regenerate the latest grammar files run:
-1.  `npm run update:grammar:official`
+1.  `npm run pull:grammar:official`
 2.  `npm run generate:official`
 
 ## Testing

@@ -3,15 +3,27 @@
   "version": "1.0.0",
   "description": "Extract column and table lineage from Trino SQL queries using the official Trino ANTLR4 grammar",
   "license": "MIT",
-  "keywords": ["sql", "lineage", "trino", "column-lineage", "sql-parser", "antlr4", "data-lineage"],
+  "keywords": [
+    "sql",
+    "lineage",
+    "trino",
+    "column-lineage",
+    "sql-parser",
+    "antlr4",
+    "data-lineage"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/its-elad/sql-lineage.git",
     "directory": "packages/core"
   },
-  "trinoGrammarVersion": "479",
   "sideEffects": false,
-  "files": ["dist", "README.md", "package.json", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "package.json",
+    "LICENSE"
+  ],
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -33,9 +45,13 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "update:grammar:official": "node scripts/update-grammar.mjs",
+    "fetch:grammar:official": "curl -L https://raw.githubusercontent.com/trinodb/trino/master/core/trino-grammar/src/main/antlr4/io/trino/grammar/sql/SqlBase.g4 -o grammar/trino-official/SqlBase.g4",
+    "pull:grammar:official": "mkdir -p grammar/trino-official && npm run fetch:grammar:official",
+    "pull:grammar:official:win": "mkdir grammar\\trino-official & npm run fetch:grammar:official",
     "generate:official": "antlr-ng -Dlanguage=TypeScript -l true -v true -o generated/official grammar/trino-official/SqlBase.g4",
-    "update:grammar:antlr4": "mkdir -p grammar/antlr4 && curl -L https://raw.githubusercontent.com/antlr/grammars-v4/master/sql/trino/TrinoLexer.g4 -o grammar/antlr4/TrinoLexer.g4 && curl -L https://raw.githubusercontent.com/antlr/grammars-v4/master/sql/trino/TrinoParser.g4 -o grammar/antlr4/TrinoParser.g4",
+    "fetch:grammar:antlr4": "curl -L https://raw.githubusercontent.com/antlr/grammars-v4/master/sql/trino/TrinoLexer.g4 -o grammar/antlr4/TrinoLexer.g4 && curl -L https://raw.githubusercontent.com/antlr/grammars-v4/master/sql/trino/TrinoParser.g4 -o grammar/antlr4/TrinoParser.g4",
+    "pull:grammar:antlr4": "mkdir -p grammar/antlr4 && npm run fetch:grammar:antlr4",
+    "pull:grammar:antlr4:win": "mkdir grammar\\antlr4 & npm run fetch:grammar:antlr4",
     "generate:antlr4": "antlr-ng -Dlanguage=TypeScript -l true -v true -o generated/antlr4 grammar/antlr4/TrinoLexer.g4 grammar/antlr4/TrinoParser.g4"
   },
   "devDependencies": {
