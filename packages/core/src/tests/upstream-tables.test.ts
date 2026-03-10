@@ -389,7 +389,71 @@ describe("UNNEST and TABLE() table functions", () => {
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. CASE INSENSITIVITY & CASING
+// 6. MATCH_RECOGNIZE
+// ─────────────────────────────────────────────────────────────────────────────
+describe("MATCH_RECOGNIZE", () => {
+  test("simple MATCH_RECOGNIZE — underlying table is returned", () => {
+    expect(
+      getUpstreamTables(`
+        SELECT *
+        FROM stock_data
+        MATCH_RECOGNIZE (
+          PARTITION BY symbol
+          ORDER BY trade_date
+          MEASURES
+            A.price AS start_price,
+            LAST(B.price) AS end_price
+          ONE ROW PER MATCH
+          PATTERN (A B+)
+          DEFINE
+            A AS price > 100,
+            B AS price > A.price
+        ) AS matches
+      `)
+    ).toEqual(["stock_data"]);
+  });
+
+  test("MATCH_RECOGNIZE joined with another table — both tables captured", () => {
+    expect(
+      getUpstreamTables(`
+        SELECT m.symbol, m.start_price, d.description
+        FROM stock_data
+        MATCH_RECOGNIZE (
+          PARTITION BY symbol
+          ORDER BY trade_date
+          MEASURES A.price AS start_price
+          ONE ROW PER MATCH
+          PATTERN (A)
+          DEFINE A AS price > 50
+        ) AS m
+        JOIN stock_descriptions d ON m.symbol = d.symbol
+      `)
+    ).toEqual(["stock_data", "stock_descriptions"]);
+  });
+
+  test("MATCH_RECOGNIZE on a CTE — CTE name excluded, underlying table returned", () => {
+    expect(
+      getUpstreamTables(`
+        WITH filtered AS (
+          SELECT symbol, trade_date, price FROM stock_data WHERE market = 'NYSE'
+        )
+        SELECT *
+        FROM filtered
+        MATCH_RECOGNIZE (
+          PARTITION BY symbol
+          ORDER BY trade_date
+          MEASURES LAST(A.price) AS peak
+          ONE ROW PER MATCH
+          PATTERN (A+)
+          DEFINE A AS price > 200
+        ) AS m
+      `)
+    ).toEqual(["stock_data"]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. CASE INSENSITIVITY & CASING
 // ─────────────────────────────────────────────────────────────────────────────
 describe("Case insensitivity", () => {
   test("same table referenced with different casing is de-duplicated", () => {
