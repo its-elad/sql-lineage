@@ -1497,6 +1497,152 @@ describe("UNNEST and TABLE() table functions", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 17. JSON_TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+describe("JSON_TABLE", () => {
+  const ORDERS_WITH_PAYLOAD = tbl("orders", ["id", "payload", "status"]);
+  const ORDERS_WITH_JSON_COLUMNS = tbl("orders", ["id", "payload", "payload_text", "status"]);
+
+  test("JSON_TABLE source expression from a real table is tracked", () => {
+    const result = run(
+      `SELECT jt.id
+       FROM orders o
+       CROSS JOIN JSON_TABLE(
+         o.payload,
+         '$'
+         COLUMNS (
+           id VARCHAR PATH '$.id'
+         )
+       ) jt`,
+      [ORDERS_WITH_PAYLOAD]
+    );
+
+    // jt.id comes from a derived JSON_TABLE alias; o.payload should still be attributed.
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["payload"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("SELECT * with JSON_TABLE(o.payload, ...) keeps base table lineage", () => {
+    const result = run(
+      `SELECT *
+       FROM orders o
+       CROSS JOIN JSON_TABLE(
+         o.payload,
+         '$'
+         COLUMNS (
+           id VARCHAR PATH '$.id'
+         )
+       ) jt`,
+      [ORDERS_WITH_PAYLOAD]
+    );
+
+    // jt.* is derived and excluded; base-table star expansion remains intact.
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["id", "payload", "status"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("JSON_TABLE source using json_extract / json_parse tracks arguments", () => {
+    const result = run(
+      `SELECT je.eid, jp.pid
+       FROM orders o
+       CROSS JOIN JSON_TABLE(
+         json_extract(o.payload, '$.items'),
+         '$[*]'
+         COLUMNS (
+           eid VARCHAR PATH '$.id'
+         )
+       ) je
+       CROSS JOIN JSON_TABLE(
+         json_parse(o.payload_text),
+         '$'
+         COLUMNS (
+           pid VARCHAR PATH '$.id'
+         )
+       ) jp`,
+      [ORDERS_WITH_JSON_COLUMNS]
+    );
+
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["payload", "payload_text"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("alias-qualified JSON_TABLE columns are treated as derived (not unresolved)", () => {
+    const result = run(
+      `SELECT jt.id, jt.ord
+       FROM JSON_TABLE('[{"id":1}]', 'lax $[*]' COLUMNS (
+         id BIGINT PATH 'lax $.id',
+         ord FOR ORDINALITY
+       )) AS jt`
+    );
+
+    expect(result).toEqual({
+      tableColumns: [],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("JSON_TABLE alias column list is accepted and does not produce unresolved refs", () => {
+    const result = run(
+      `SELECT jt_alias.c1
+       FROM JSON_TABLE('[{"id":1}]', 'lax $[*]' COLUMNS (
+         id BIGINT PATH 'lax $.id'
+       )) AS jt_alias(c1)`
+    );
+
+    expect(result).toEqual({
+      tableColumns: [],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("JSON_TABLE in JOIN ON does not leak unresolved columns and still tracks real tables", () => {
+    const result = run(
+      `SELECT u.id
+       FROM users u
+       JOIN JSON_TABLE('[{"id":1}]', 'lax $[*]' COLUMNS (
+         id BIGINT PATH 'lax $.id',
+         nested_json VARCHAR FORMAT JSON PATH 'lax $.nested'
+       )) AS jt
+         ON jt.id = u.id
+       WHERE u.status = 'active'`,
+      [USERS]
+    );
+
+    expect(result).toEqual({
+      tableColumns: [{ table: "users", columns: ["id", "status"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("JSON_TABLE with NESTED COLUMNS parses and participates in alias resolution", () => {
+    const result = run(
+      `SELECT u.id, jt.x
+       FROM users u
+       JOIN JSON_TABLE('[{"id":1,"arr":[{"x":10}]}]', 'lax $[*]' COLUMNS (
+         id BIGINT PATH 'lax $.id',
+         NESTED PATH 'lax $.arr[*]' COLUMNS (
+           x BIGINT PATH 'lax $.x'
+         )
+       )) AS jt
+         ON jt.id = u.id`,
+      [USERS]
+    );
+
+    // jt.* references are derived and intentionally excluded from output.
+    expect(result).toEqual({
+      tableColumns: [{ table: "users", columns: ["id"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // OBSCURE & EDGE CASES — SCHEMA, METADATA, AND SQL
 // ─────────────────────────────────────────────────────────────────────────────
 describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {

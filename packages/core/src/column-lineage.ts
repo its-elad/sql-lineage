@@ -31,8 +31,11 @@ import {
   OrderByContext,
   PatternRecognitionContext,
   PatternVariableContext,
-  SubsetDefinitionContext,
   RowPatternContext,
+  JsonTableContext,
+  OrdinalityColumnContext,
+  ValueColumnContext,
+  QueryColumnContext,
 } from "./generated/official/SqlBaseParser.js";
 import { parseSqlAntlr } from "./parser.js";
 import {
@@ -501,6 +504,8 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
                 }
               } else if (p instanceof TableFunctionInvocationContext) {
                 this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
+              } else if (p instanceof JsonTableContext) {
+                this.customVisitJsonTableInternals(p);
               }
             }
           });
@@ -874,6 +879,8 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       }
     } else if (p instanceof TableFunctionInvocationContext) {
       this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
+    } else if (p instanceof JsonTableContext) {
+      this.customVisitJsonTableInternals(p);
     }
   }
 
@@ -1013,6 +1020,23 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
         const columns = columnAliasCtx ? columnAliasCtx.identifier().map(getIdentifierText) : [];
         scope.tables.set(normalizeId(alias), createScopeTable(alias, columns, "derived"));
       }
+    } else if (primary instanceof JsonTableContext) {
+      // if there is no alias, the source table is not addressable at all
+      if (alias) {
+        let columns: string[] = [];
+        if (columnAliasCtx) {
+          columns = columnAliasCtx.identifier().map(getIdentifierText);
+        } else {
+          columns = primary.jsonTableColumn()
+            .filter((c): c is OrdinalityColumnContext | ValueColumnContext | QueryColumnContext =>
+              c instanceof OrdinalityColumnContext ||
+              c instanceof ValueColumnContext ||
+              c instanceof QueryColumnContext
+            )
+            .map((c) => getIdentifierText(c.identifier()));
+        }
+        scope.tables.set(normalizeId(alias), createScopeTable(alias, columns, "derived"));
+      }
     }
   }
 
@@ -1060,6 +1084,19 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
         const expr = arg.expression();
         if (expr) this.visit(expr);
       }
+    }
+  }
+
+  /**
+   * Visits expression-bearing clauses inside a JSON_TABLE invocation.
+   *
+   * This captures references from the source JSON expression (e.g. `o.payload`)
+   * and from optional DEFAULT expressions in column definitions.
+   */
+  private customVisitJsonTableInternals(ctx: JsonTableContext): void {
+    this.visit(ctx.jsonPathInvocation());
+    for (const column of ctx.jsonTableColumn()) {
+      this.visit(column);
     }
   }
 
