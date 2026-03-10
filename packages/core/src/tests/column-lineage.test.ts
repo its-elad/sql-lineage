@@ -57,48 +57,46 @@ describe("Basic SELECT", () => {
     });
   });
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 3. SAME COLUMN NAME IN DIFFERENT SCOPES
-    // ─────────────────────────────────────────────────────────────────────────────
-    describe("Same column name from different tables in different scopes", () => {
-      const ONE = tbl("one", ["id"]);
-      const TWO = tbl("two", ["id"]);
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 3. SAME COLUMN NAME IN DIFFERENT SCOPES
+  // ─────────────────────────────────────────────────────────────────────────────
+  describe("Same column name from different tables in different scopes", () => {
+    const ONE = tbl("one", ["id"]);
+    const TWO = tbl("two", ["id"]);
 
-      test("unqualified column in main and subquery", () => {
-        const sql = `SELECT id, (SELECT max(id) FROM two) as max_id FROM one`;
-        const result = run(sql, [ONE, TWO]);
-        expect(result).toEqual({
-          tableColumns: [
-            { table: "one", columns: ["id"] },
-            { table: "two", columns: ["id"] },
-          ],
-          unresolvedTableColumns: [],
-        });
-      });
-
-      test("unqualified column in subquery only", () => {
-        const sql = `SELECT (SELECT max(id) FROM two) as max_id FROM one`;
-        const result = run(sql, [ONE, TWO]);
-        expect(result).toEqual({
-          tableColumns: [
-            { table: "two", columns: ["id"] },
-          ],
-          unresolvedTableColumns: [],
-        });
-      });
-
-      test("unqualified column in main query only", () => {
-        const sql = `SELECT id FROM one WHERE id > (SELECT max(id) FROM two)`;
-        const result = run(sql, [ONE, TWO]);
-        expect(result).toEqual({
-          tableColumns: [
-            { table: "one", columns: ["id"] },
-            { table: "two", columns: ["id"] },
-          ],
-          unresolvedTableColumns: [],
-        });
+    test("unqualified column in main and subquery", () => {
+      const sql = `SELECT id, (SELECT max(id) FROM two) as max_id FROM one`;
+      const result = run(sql, [ONE, TWO]);
+      expect(result).toEqual({
+        tableColumns: [
+          { table: "one", columns: ["id"] },
+          { table: "two", columns: ["id"] },
+        ],
+        unresolvedTableColumns: [],
       });
     });
+
+    test("unqualified column in subquery only", () => {
+      const sql = `SELECT (SELECT max(id) FROM two) as max_id FROM one`;
+      const result = run(sql, [ONE, TWO]);
+      expect(result).toEqual({
+        tableColumns: [{ table: "two", columns: ["id"] }],
+        unresolvedTableColumns: [],
+      });
+    });
+
+    test("unqualified column in main query only", () => {
+      const sql = `SELECT id FROM one WHERE id > (SELECT max(id) FROM two)`;
+      const result = run(sql, [ONE, TWO]);
+      expect(result).toEqual({
+        tableColumns: [
+          { table: "one", columns: ["id"] },
+          { table: "two", columns: ["id"] },
+        ],
+        unresolvedTableColumns: [],
+      });
+    });
+  });
 
   test("all columns listed explicitly", () => {
     const result = run(`SELECT id, name, email, status FROM users`, [USERS]);
@@ -1772,6 +1770,86 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     expect(result).toEqual({
       tableColumns: [],
       unresolvedTableColumns: [{ column: "id" }],
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 20. SAME TABLE NAME, DIFFERENT SCHEMAS
+// ─────────────────────────────────────────────────────────────────────────────
+describe("Same table name, different schemas", () => {
+  const S1_CUSTOMERS = tbl("customers", ["id", "name"], "schema1");
+  const S2_CUSTOMERS = tbl("customers", ["id", "email"], "schema2");
+
+  test("fully-qualified references each resolve to the correct schema's table", () => {
+    const result = run(
+      `SELECT schema1.customers.id, schema2.customers.email
+       FROM schema1.customers, schema2.customers`,
+      [S1_CUSTOMERS, S2_CUSTOMERS]
+    );
+    expect(result).toEqual({
+      tableColumns: [
+        { table: "schema1.customers", columns: ["id"] },
+        { table: "schema2.customers", columns: ["email"] },
+      ],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("ambiguous short-name qualifier (customers.col) is unresolved", () => {
+    const result = run(`SELECT customers.id FROM schema1.customers, schema2.customers`, [S1_CUSTOMERS, S2_CUSTOMERS]);
+    // 'customers' is ambiguous — neither schema1 nor schema2 should win
+    expect(result).toEqual({
+      tableColumns: [],
+      unresolvedTableColumns: [{ column: "customers.id" }],
+    });
+  });
+
+  test("bare column present in both schemas is reported as ambiguous", () => {
+    const result = run(`SELECT id FROM schema1.customers, schema2.customers`, [S1_CUSTOMERS, S2_CUSTOMERS]);
+    expect(result).toEqual({
+      tableColumns: [],
+      unresolvedTableColumns: [{ column: "id" }],
+    });
+  });
+
+  test("bare column present in only one schema resolves correctly", () => {
+    const result = run(`SELECT name FROM schema1.customers, schema2.customers`, [S1_CUSTOMERS, S2_CUSTOMERS]);
+    expect(result).toEqual({
+      tableColumns: [{ table: "schema1.customers", columns: ["name"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("aliases disambiguate same-name tables from different schemas", () => {
+    const result = run(`SELECT c1.id, c2.email FROM schema1.customers c1, schema2.customers c2`, [
+      S1_CUSTOMERS,
+      S2_CUSTOMERS,
+    ]);
+    expect(result).toEqual({
+      tableColumns: [
+        { table: "schema1.customers", columns: ["id"] },
+        { table: "schema2.customers", columns: ["email"] },
+      ],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("three schemas — short name stays poisoned after first collision", () => {
+    const S3_CUSTOMERS = tbl("customers", ["id", "address"], "schema3");
+    const result = run(
+      `SELECT schema1.customers.id, schema2.customers.email, schema3.customers.address, customers.id
+       FROM schema1.customers, schema2.customers, schema3.customers`,
+      [S1_CUSTOMERS, S2_CUSTOMERS, S3_CUSTOMERS]
+    );
+    expect(result).toEqual({
+      tableColumns: [
+        { table: "schema1.customers", columns: ["id"] },
+        { table: "schema2.customers", columns: ["email"] },
+        { table: "schema3.customers", columns: ["address"] },
+      ],
+      // customers.id is ambiguous — short name should not resolve to any table
+      unresolvedTableColumns: [{ column: "customers.id" }],
     });
   });
 });

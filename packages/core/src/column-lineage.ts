@@ -27,6 +27,7 @@ import {
   ColumnReferenceContext,
   DereferenceContext,
   JoinCriteriaContext,
+  OrderByContext,
 } from "./generated/official/SqlBaseParser.js";
 import { parseSqlAntlr } from "./parser.js";
 import {
@@ -121,6 +122,13 @@ interface CteScopeTable extends ScopeTable {
 interface QueryScope {
   /** Maps normalised alias (or bare table name) → table info. */
   tables: Map<NormalizedIdBrand, ScopeTable>;
+  /**
+   * Short names that have been "poisoned" because two or more unaliased tables
+   * share the same bare name (e.g. schema1.customers and schema2.customers).
+   * Once poisoned a key must never be re-inserted, even if a third table with
+   * the same short name arrives later.
+   */
+  ambiguousKeys: Set<NormalizedIdBrand>;
 }
 
 /** Scope tracking for WITH-clause CTE registrations. */
@@ -186,9 +194,9 @@ function createScopeTable<K extends ScopeTableKind = "real">(
  *     and leaves the scope live for the main query body. {@link visitQuery}
  *     pops it afterwards. This means CTE visibility is scoped correctly —
  *     inner WITH clauses cannot leak definitions to outer queries.
- *  3. {@link processTerm} builds a scope from the FROM clause and pushes it.
- *     {@link processQueryNoWith} visits ORDER BY while the scope is live, then
- *     pops it.
+ *  3. {@link processQueryNoWith} delegates the term and ORDER BY clause to
+ *     {@link processTermAndOrderBy}, which builds a scope from the FROM clause,
+ *     visits ORDER BY while the scope is live, and pops the scope.
  *  4. {@link visitDereference} and {@link visitColumnReference} are the leaf
  *     resolvers — they look up columns in the query-scope stack.
  *  5. {@link visitSelectAll} expands `*` / `table.*` using each scope table's
@@ -432,45 +440,33 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
 
   /**
    * Drives traversal of a WITH-less query body (or the body after CTEs have
-   * been registered). Delegates to {@link processTerm} for the main term, then
-   * visits ORDER BY while the term's scope is still active, and finally pops
-   * that scope.
+   * been registered). Delegates the query term and ORDER BY clause together to
+   * {@link processTermAndOrderBy}, which handles scope management internally.
    */
   private processQueryNoWith(ctx: QueryNoWithContext): void {
-    const term = ctx.queryTerm();
-    const scopeWasPushed = this.processTerm(term);
-
-    const orderBy = ctx.orderBy();
-    if (orderBy) {
-      this.visit(orderBy);
-    }
-
-    if (scopeWasPushed) {
-      this.popQueryScope();
-    }
+    this.processTermAndOrderBy(ctx.queryTerm(), ctx.orderBy());
   }
 
   /**
-   * Processes a single query term and returns `true` if a scope was pushed
-   * onto {@link queryScopeStack} (the caller — {@link processQueryNoWith} — is
-   * then responsible for visiting ORDER BY and popping it afterwards).
+   * Processes a single query term and, when provided, visits ORDER BY while
+   * the term's scope is still active, then pops that scope.
    *
    * A *term* is the grammar unit that sits between WITH and ORDER BY/LIMIT.
    * It is either:
    *  - A **query primary** (`QueryTermDefault`) — one of:
    *    - A `SELECT` statement (`QueryPrimaryDefault` / `querySpecification`):
    *      builds a scope from the FROM clause, pushes it, visits all
-   *      column-bearing clauses via {@link customVisitSpecInternals}, then
-   *      visits the bodies of any FROM-clause subqueries / UNNEST / TABLE()
-   *      while that scope is active. Returns `true`.
+   *      column-bearing clauses via {@link customVisitSpecInternals}, visits
+   *      the bodies of any FROM-clause subqueries / UNNEST / TABLE() while
+   *      that scope is active, then visits ORDER BY (if present) and pops
+   *      the scope.
    *    - A parenthesised subquery (`Subquery`): delegates to
-   *      {@link processQueryNoWith} and returns `false` (the inner call
-   *      manages its own scope).
+   *      {@link processQueryNoWith}, which manages its own scope.
    *  - A **set operation** (`SetOperation` — UNION / EXCEPT / INTERSECT):
    *    recursively processes the left and right terms, each managing their
-   *    own scope. Returns `false`.
+   *    own scope. ORDER BY is not forwarded to recursive calls.
    */
-  private processTerm(term: QueryTermContext): boolean {
+  private processTermAndOrderBy(term: QueryTermContext, orderBy?: OrderByContext | null): void {
     if (term instanceof QueryTermDefaultContext) {
       const primary = term.queryPrimary();
 
@@ -500,39 +496,36 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
           });
         }
 
-        return true; // scope stays for ORDER BY
+        if (orderBy) {
+          this.visit(orderBy);
+        }
+        this.popQueryScope();
       }
 
       if (primary instanceof SubqueryContext) {
         this.processQueryNoWith(primary.queryNoWith());
-        return false;
       }
     }
 
     if (term instanceof SetOperationContext) {
       if (term._left) {
-        const pushed = this.processTerm(term._left);
-        if (pushed) this.popQueryScope();
+        this.processTermAndOrderBy(term._left);
       }
       if (term._right) {
-        const pushed = this.processTerm(term._right);
-        if (pushed) this.popQueryScope();
+        this.processTermAndOrderBy(term._right);
       }
-      return false;
     }
-
-    return false;
   }
 
-  private visitJoinConditions(rel: RelationContext): void {
-    if (!(rel instanceof JoinRelationContext)) return;
-
+  private customVisitJoinConditions(rel: JoinRelationContext): void {
     const criteria = rel.joinCriteria();
     if (criteria) {
       this.visit(criteria);
     }
     for (const child of rel.relation()) {
-      this.visitJoinConditions(child);
+      if (child instanceof JoinRelationContext) {
+        this.customVisitJoinConditions(child);
+      }
     }
   }
 
@@ -543,11 +536,10 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
    *
    * Deliberately excludes two things that `visitChildren` would also reach:
    *  - **Derived source bodies** (subquery, LATERAL, UNNEST, TABLE() in FROM):
-   *    handled by {@link processTerm} after this call, so each body gets its
+   *    handled by {@link processTermAndOrderBy} after this call, so each body gets its
    *    own child scope pushed and popped independently.
    *  - **ORDER BY**: a sibling of the term in the grammar, visited by
-   *    {@link processQueryNoWith} while the scope is still live, after
-   *    `processTerm` returns.
+   *    {@link processTermAndOrderBy} while the scope is still live.
    */
   private customVisitSpecInternals(spec: QuerySpecificationContext): void {
     for (const item of spec.selectItem()) {
@@ -567,7 +559,9 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       this.visit(window);
     }
     for (const relation of spec.relation()) {
-      this.visitJoinConditions(relation);
+      if (relation instanceof JoinRelationContext) {
+        this.customVisitJoinConditions(relation);
+      }
     }
   }
 
@@ -581,9 +575,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
    */
   private resolveTableFromScope(nameOrAlias: string): ScopeTable | undefined {
     const tableId = normalizeId(nameOrAlias);
-    for (let i = this.queryScopeStack.length - 1; i >= 0; i--) {
-      const scope = this.queryScopeStack[i];
-      if (!scope) continue;
+    for (const scope of this.queryScopeStack.toReversed()) {
       const table = scope.tables.get(tableId);
       if (table) return table;
     }
@@ -595,24 +587,22 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
    * name. Returns the {@link CteScopeTable}.
    */
   private resolveCteFromCteScope(normalizedName: NormalizedIdBrand): CteScopeTable | undefined {
-    for (let i = this.cteScopeStack.length - 1; i >= 0; i--) {
-      const scope = this.cteScopeStack[i];
-      if (!scope) continue;
+    for (const scope of this.cteScopeStack.toReversed()) {
       const table = scope.tables.get(normalizedName);
-      return table;
+      if (table) return table;
     }
     return undefined;
   }
 
   /**
    * Records a resolved column to the appropriate output:
-   * - `'unknown'` table or missing column → {@link unresolvedColumns} (`{ skipped: false }`)
-   * - `'real'` table → {@link resultEntries} (`{ skipped: false }`)
-   * - `'cte'` / `'derived'` → silently dropped (`{ skipped: true }`)
+   * - `'unknown'` table or missing column → {@link unresolvedColumns}
+   * - `'real'` table → {@link resultEntries}
+   * - `'cte'` / `'derived'` → silently dropped
    */
-  private recordColumn(table: ScopeTable, column: string): { skipped: boolean } {
+  private recordColumn(table: ScopeTable, column: string): void {
     if (table.kind !== "real" && table.kind !== "unknown") {
-      return { skipped: true };
+      return;
     }
     const normalizedColumn = normalizeId(column);
     const originalColumnName = table.columnsByNormalized.get(normalizedColumn);
@@ -621,7 +611,6 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       if (!this.unresolvedColumns.has(unresolvedColumn)) {
         this.unresolvedColumns.add(unresolvedColumn);
       }
-      return { skipped: false };
     } else if (table.kind === "real") {
       const tableId = normalizeId(table.qualifiedName);
       let entry = this.resultEntries.get(tableId);
@@ -630,10 +619,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
         this.resultEntries.set(tableId, entry);
       }
       entry.columns.add(originalColumnName);
-      return { skipped: false };
     }
-
-    return { skipped: true };
   }
 
   /**
@@ -724,10 +710,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
    */
   private tryResolveAndRecordUnqualifiedColumn(columnName: string): boolean {
     const normalized = normalizeId(columnName);
-    for (let i = this.queryScopeStack.length - 1; i >= 0; i--) {
-      const scope = this.queryScopeStack[i];
-      if (!scope) continue;
-
+    for (const scope of this.queryScopeStack.toReversed()) {
       // Collect all *distinct* ScopeTable objects in this scope that own the column.
       const matches: Array<{ table: ScopeTable; originalColumnName: string }> = [];
       const seenTables = new Set<NormalizedIdBrand>();
@@ -763,7 +746,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
 
   /** Builds a {@link QueryScope} from a list of FROM-clause relations. */
   private buildScopeFromRelations(relations: RelationContext[]): QueryScope {
-    const scope: QueryScope = { tables: new Map() };
+    const scope: QueryScope = { tables: new Map(), ambiguousKeys: new Set() };
     for (const rel of relations) {
       this.forEachAliasedRelation(rel, (aliased) => {
         this.registerAliasedRelation(aliased, scope);
@@ -844,13 +827,33 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
 
       const scopeTable = createScopeTable(source.qualifiedName, columns, source.kind);
 
-      // Register under alias (or bare table name when no alias)
-      const aliasOrName = alias ?? nameParts.at(-1);
-      const scopeTableKey = aliasOrName ? normalizeId(aliasOrName) : normalizedName;
-      scope.tables.set(scopeTableKey, scopeTable);
+      // Register under alias (or bare table name when no alias).
+      const bareName = nameParts.at(-1);
+      const normalizedAlias = alias ? normalizeId(alias) : null;
+      const normalizedBareName = bareName ? normalizeId(bareName) : null;
 
-      // Also register under full qualified name for direct references
-      if (scopeTableKey !== normalizedName) {
+      if (normalizedAlias) {
+        // Explicit alias — always register; the user controls uniqueness.
+        scope.tables.set(normalizedAlias, scopeTable);
+      } else if (normalizedBareName) {
+        // Unaliased short name — guard against collisions from same-name tables in
+        // different schemas (e.g. schema1.customers vs schema2.customers).
+        // Once poisoned, the key must stay absent even if a third table arrives later.
+        if (!scope.ambiguousKeys.has(normalizedBareName)) {
+          const existingByBareName = scope.tables.get(normalizedBareName);
+          // Inequality guard: same table registered twice (e.g. a self-join) is not a collision.
+          if (existingByBareName && normalizeId(existingByBareName.qualifiedName) !== normalizedName) {
+            scope.tables.delete(normalizedBareName);
+            scope.ambiguousKeys.add(normalizedBareName);
+          } else {
+            scope.tables.set(normalizedBareName, scopeTable);
+          }
+        }
+      }
+
+      // Also register under the full qualified name so schema1.customers.col
+      // always resolves even when the short name is poisoned.
+      if (!scope.tables.has(normalizedName)) {
         scope.tables.set(normalizedName, scopeTable);
       }
     } else if (primary instanceof SubqueryRelationContext) {
@@ -891,7 +894,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
 
           // Build a temporary scope so PARTITION BY / ORDER BY columns
           // resolve against this argument table.
-          const tempScope: QueryScope = { tables: new Map() };
+          const tempScope: QueryScope = { tables: new Map(), ambiguousKeys: new Set() };
           tempScope.tables.set(normalizedName, scopeTable);
           const argAliasCtx = rel.identifier();
           if (argAliasCtx) {
