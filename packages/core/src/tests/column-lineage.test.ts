@@ -1853,3 +1853,376 @@ describe("Same table name, different schemas", () => {
     });
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MATCH_RECOGNIZE
+// ─────────────────────────────────────────────────────────────────────────────
+describe("MATCH_RECOGNIZE", () => {
+  const TICKER = tbl("ticker", ["symbol", "event_time", "price", "volume"]);
+
+  const BASIC_MR = `
+    SELECT m.symbol, m.first_price, m.last_price
+    FROM ticker MATCH_RECOGNIZE (
+      PARTITION BY symbol
+      ORDER BY event_time
+      MEASURES
+        FIRST(A.price) AS first_price,
+        LAST(B.price)  AS last_price
+      ONE ROW PER MATCH
+      PATTERN (A+ B+)
+      DEFINE
+        A AS price < 100,
+        B AS price >= 100
+    ) AS m
+  `;
+
+  test("MEASURES expressions resolve to source table columns", () => {
+    const result = run(BASIC_MR, [TICKER]);
+    // BASIC_MR also has PARTITION BY symbol and ORDER BY event_time — both tracked.
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["event_time", "price", "symbol"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("PARTITION BY expression resolves to source table column", () => {
+    const result = run(
+      `SELECT m.sym
+       FROM ticker MATCH_RECOGNIZE (
+         PARTITION BY symbol
+         MEASURES symbol AS sym
+         ONE ROW PER MATCH
+         PATTERN (A)
+         DEFINE A AS TRUE
+       ) AS m`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["symbol"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("ORDER BY inside MATCH_RECOGNIZE resolves to source table column", () => {
+    const result = run(
+      `SELECT m.vol
+       FROM ticker MATCH_RECOGNIZE (
+         ORDER BY event_time
+         MEASURES volume AS vol
+         ONE ROW PER MATCH
+         PATTERN (A)
+         DEFINE A AS TRUE
+       ) AS m`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["event_time", "volume"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("DEFINE expression resolves to source table column", () => {
+    const result = run(
+      `SELECT m.cnt
+       FROM ticker MATCH_RECOGNIZE (
+         MEASURES COUNT(A.price) AS cnt
+         ALL ROWS PER MATCH
+         PATTERN (A*)
+         DEFINE A AS price > 50
+       ) AS m`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["price"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("qualified measure column reference in outer SELECT resolves (derived — silently dropped; source columns attributed via MEASURES)", () => {
+    // m.first_price is qualified against the derived 'm' table — recordColumn
+    // silently drops derived entries. The actual lineage comes from visiting
+    // FIRST(A.price) inside MATCH_RECOGNIZE.
+    const result = run(
+      `SELECT m.first_price
+       FROM ticker MATCH_RECOGNIZE (
+         MEASURES FIRST(A.price) AS first_price
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS price < 100
+       ) AS m`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["price"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("SELECT * — source columns attributed through MEASURES and other clauses", () => {
+    // SELECT * sees derived table 'm' (silently dropped by recordColumn).
+    // Lineage comes from visiting PARTITION BY, ORDER BY, MEASURES, DEFINE.
+    const result = run(
+      `SELECT *
+       FROM ticker MATCH_RECOGNIZE (
+         PARTITION BY symbol
+         ORDER BY event_time
+         MEASURES A.price AS first_price
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS price < 100
+       ) AS m`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["event_time", "price", "symbol"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("MATCH_RECOGNIZE output column referenced in WHERE of outer query", () => {
+    // Outer WHERE references m.first_price — that's the derived alias column.
+    // It resolves to the derived table and is silently dropped;
+    // the source attribution still comes from visiting MEASURES A.price.
+    const result = run(
+      `SELECT m.symbol
+       FROM ticker MATCH_RECOGNIZE (
+         PARTITION BY symbol
+         MEASURES FIRST(A.price) AS first_price
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS price > 0
+       ) AS m
+       WHERE m.first_price > 50`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["price", "symbol"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("MATCH_RECOGNIZE without alias — internals still visited", () => {
+    // No alias on the MATCH_RECOGNIZE block. The output cannot be referenced
+    // by name, but the clause expressions are still visited against the source.
+    const result = run(
+      `SELECT *
+       FROM ticker MATCH_RECOGNIZE (
+         PARTITION BY symbol
+         MEASURES A.price AS first_price
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS price < 100
+       )`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["price", "symbol"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("MATCH_RECOGNIZE source with unknown table — unresolved columns reported", () => {
+    // Use a literal in DEFINE to avoid a second bare-column entry from the predicate.
+    const result = run(
+      `SELECT m.measure_col
+       FROM unknown_tbl MATCH_RECOGNIZE (
+         MEASURES A.col1 AS measure_col
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS 1 = 1
+       ) AS m`,
+      [] // no metadata
+    );
+    expect(result).toEqual({
+      tableColumns: [],
+      unresolvedTableColumns: [
+        { table: "unknown_tbl", column: "col1" },
+      ],
+    });
+  });
+
+  test("MATCH_RECOGNIZE with known table but column not in metadata — reported as unresolved on that table", () => {
+    // ghost_col is referenced in DEFINE but absent from TICKER's metadata;
+    // it should surface as { table: "ticker", column: "ghost_col" }.
+    const result = run(
+      `SELECT m.p
+       FROM ticker MATCH_RECOGNIZE (
+         MEASURES A.price AS p
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS ghost_col > 0
+       ) AS m`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["price"] }],
+      unresolvedTableColumns: [{ column: "ghost_col" }],
+    });
+  });
+
+  test("CTE as MATCH_RECOGNIZE source table", () => {
+    // Source of the MR block is a CTE, not a raw table. Column references
+    // inside PARTITION BY / MEASURES / DEFINE resolve via the CTE, which is
+    // transparent (kind='cte'). Lineage ultimately flows back to the real
+    // underlying table through the CTE body visit in processCtes.
+    const result = run(
+      `WITH ticks AS (SELECT symbol, event_time, price FROM ticker)
+       SELECT m.first_price
+       FROM ticks MATCH_RECOGNIZE (
+         PARTITION BY symbol
+         ORDER BY event_time
+         MEASURES FIRST(A.price) AS first_price
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS price > 0
+       ) AS m`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["event_time", "price", "symbol"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("MATCH_RECOGNIZE inside a CTE body", () => {
+    // The entire MR block lives inside a WITH clause. The outer query reads
+    // from the CTE; lineage should still trace back to the source table.
+    const result = run(
+      `WITH mr AS (
+         SELECT m.symbol, m.first_price
+         FROM ticker MATCH_RECOGNIZE (
+           PARTITION BY symbol
+           MEASURES FIRST(A.price) AS first_price
+           ONE ROW PER MATCH
+           PATTERN (A+)
+           DEFINE A AS price > 0
+         ) AS m
+       )
+       SELECT symbol, first_price FROM mr`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["price", "symbol"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("MATCH_RECOGNIZE output joined with another table", () => {
+    // Tests the JOIN walker path: MR output on one side, plain table on the other.
+    const STOCK_INFO = tbl("stock_info", ["symbol", "sector"]);
+    const result = run(
+      `SELECT m.first_price, s.sector
+       FROM ticker MATCH_RECOGNIZE (
+         PARTITION BY symbol
+         MEASURES FIRST(A.price) AS first_price, symbol AS symbol
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS price > 0
+       ) AS m
+       JOIN stock_info s ON m.symbol = s.symbol`,
+      [TICKER, STOCK_INFO]
+    );
+    expect(result).toEqual({
+      tableColumns: [
+        { table: "stock_info", columns: ["sector", "symbol"] },
+        { table: "ticker", columns: ["price", "symbol"] },
+      ],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("MATCH_RECOGNIZE with explicit output column alias list", () => {
+    // Column aliases on the MR output override the MEASURES names for the
+    // outer derived scope. The registerPatternRecognition columnAliases() path
+    // is exercised; measure expressions are still visited for lineage.
+    const result = run(
+      `SELECT m.open_price
+       FROM ticker MATCH_RECOGNIZE (
+         MEASURES FIRST(A.price) AS first_price
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS price > 0
+       ) AS m (open_price)`,
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["price"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("subquery as MATCH_RECOGNIZE source", () => {
+    // The MR source is an inline subquery. visitMatchRecognizeInternals visits
+    // the subquery body separately; the subquery's output columns form the
+    // inner derived scope against which pattern variable references resolve.
+    const result = run(
+      `SELECT m.p
+       FROM (SELECT price, volume FROM ticker) AS src MATCH_RECOGNIZE (
+         MEASURES FIRST(A.price) AS p
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS 1 = 1
+       ) AS m`,
+      [TICKER]
+    );
+    // A.price resolves against derived 'src' (silently dropped). The subquery
+    // body visit tracks ticker.price and ticker.volume.
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["price", "volume"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("SUBSET variable in MEASURES resolves to source table columns", () => {
+    // U is defined via SUBSET U = (C, D). SUBSET aliases are now registered
+    // as scope entries pointing at the source table, so U.totalprice resolves
+    // to orders.totalprice just like A.totalprice or B.totalprice.
+    const ORDERS_MR = tbl("orders", ["custkey", "orderdate", "totalprice"]);
+    const result = run(
+      `SELECT * FROM orders MATCH_RECOGNIZE(
+         PARTITION BY custkey
+         ORDER BY orderdate
+         MEASURES
+           A.totalprice AS starting_price,
+           LAST(B.totalprice) AS bottom_price,
+           LAST(U.totalprice) AS top_price
+         ONE ROW PER MATCH
+         AFTER MATCH SKIP PAST LAST ROW
+         PATTERN (A B+ C+ D+)
+         SUBSET U = (C, D)
+         DEFINE
+           B AS totalprice < PREV(totalprice),
+           C AS totalprice > PREV(totalprice) AND totalprice <= A.totalprice,
+           D AS totalprice > PREV(totalprice)
+       )`,
+      [ORDERS_MR]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "orders", columns: ["custkey", "orderdate", "totalprice"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test(
+    "pattern variable not listed in DEFINE resolves to source table",
+    () => {
+      // C is a valid pattern variable (unlisted variables default to always-match
+      // in Trino). Even though C has no DEFINE entry, C.price should resolve
+      // to ticker.price.
+      const result = run(
+        `SELECT m.p
+         FROM ticker MATCH_RECOGNIZE (
+           MEASURES C.price AS p
+           ONE ROW PER MATCH
+           PATTERN (C+)
+           DEFINE A AS 1 = 1
+         ) AS m`,
+        [TICKER]
+      );
+      expect(result).toEqual({
+        tableColumns: [{ table: "ticker", columns: ["price"] }],
+        unresolvedTableColumns: [],
+      });
+    }
+  );
+});

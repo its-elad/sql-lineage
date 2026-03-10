@@ -1,3 +1,4 @@
+import { ParserRuleContext } from "antlr4ng";
 import { SqlBaseVisitor } from "./generated/official/SqlBaseVisitor.js";
 import {
   QueryContext,
@@ -28,6 +29,10 @@ import {
   DereferenceContext,
   JoinCriteriaContext,
   OrderByContext,
+  PatternRecognitionContext,
+  PatternVariableContext,
+  SubsetDefinitionContext,
+  RowPatternContext,
 } from "./generated/official/SqlBaseParser.js";
 import { parseSqlAntlr } from "./parser.js";
 import {
@@ -477,21 +482,26 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
 
         this.customVisitSpecInternals(spec);
 
-        // Visit the bodies of derived sources (subquery, LATERAL, UNNEST, TABLE())
-        // after the scope is live.
+        // Visit derived-source bodies and MATCH_RECOGNIZE internals after the
+        // scope is live.
         for (const rel of spec.relation()) {
-          this.forEachAliasedRelation(rel, (aliased) => {
-            const p = aliased.relationPrimary();
-            if (p instanceof SubqueryRelationContext) {
-              this.visit(p.query());
-            } else if (p instanceof LateralContext) {
-              this.visit(p.query());
-            } else if (p instanceof UnnestContext) {
-              for (const expr of p.expression()) {
-                this.visit(expr);
+          this.forEachPatternRecognition(rel, (patRec) => {
+            if (patRec.MATCH_RECOGNIZE()) {
+              this.customVisitMatchRecognizeInternals(patRec);
+            } else {
+              const aliased = patRec.aliasedRelation();
+              const p = aliased.relationPrimary();
+              if (p instanceof SubqueryRelationContext) {
+                this.visit(p.query());
+              } else if (p instanceof LateralContext) {
+                this.visit(p.query());
+              } else if (p instanceof UnnestContext) {
+                for (const expr of p.expression()) {
+                  this.visit(expr);
+                }
+              } else if (p instanceof TableFunctionInvocationContext) {
+                this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
               }
-            } else if (p instanceof TableFunctionInvocationContext) {
-              this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
             }
           });
         }
@@ -748,39 +758,144 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
   private buildScopeFromRelations(relations: RelationContext[]): QueryScope {
     const scope: QueryScope = { tables: new Map(), ambiguousKeys: new Set() };
     for (const rel of relations) {
-      this.forEachAliasedRelation(rel, (aliased) => {
-        this.registerAliasedRelation(aliased, scope);
+      this.forEachPatternRecognition(rel, (patRec) => {
+        this.registerPatternRecognition(patRec, scope);
       });
     }
     return scope;
   }
 
-  /** Unwraps parenthesised relations, then invokes the callback. */
-  private dispatchAliased(aliased: AliasedRelationContext, callback: (aliased: AliasedRelationContext) => void): void {
-    const primary = aliased.relationPrimary();
+  /**
+   * Unwraps a parenthesised relation at the {@link PatternRecognitionContext}
+   * level, then invokes the callback.
+   */
+  private dispatchPatternRecognition(
+    ctx: PatternRecognitionContext,
+    callback: (patRec: PatternRecognitionContext) => void
+  ): void {
+    const primary = ctx.aliasedRelation().relationPrimary();
     if (primary instanceof ParenthesizedRelationContext) {
-      this.forEachAliasedRelation(primary.relation(), callback);
+      this.forEachPatternRecognition(primary.relation(), callback);
     } else {
-      callback(aliased);
+      callback(ctx);
     }
   }
 
   /**
    * Walks a FROM-clause relation tree and invokes `callback` for every
-   * {@link AliasedRelationContext} found. Parenthesised relations are
+   * {@link PatternRecognitionContext} leaf found. Parenthesised relations are
    * transparently unwrapped.
    */
-  private forEachAliasedRelation(rel: RelationContext, callback: (aliased: AliasedRelationContext) => void): void {
+  private forEachPatternRecognition(rel: RelationContext, callback: (patRec: PatternRecognitionContext) => void): void {
     if (rel instanceof JoinRelationContext) {
       for (const child of rel.relation()) {
-        this.forEachAliasedRelation(child, callback);
+        this.forEachPatternRecognition(child, callback);
       }
       const sampledRelation = rel.sampledRelation();
       if (sampledRelation) {
-        this.dispatchAliased(sampledRelation.patternRecognition().aliasedRelation(), callback);
+        this.dispatchPatternRecognition(sampledRelation.patternRecognition(), callback);
       }
     } else if (rel instanceof RelationDefaultContext) {
-      this.dispatchAliased(rel.sampledRelation().patternRecognition().aliasedRelation(), callback);
+      this.dispatchPatternRecognition(rel.sampledRelation().patternRecognition(), callback);
+    }
+  }
+
+  /**
+   * Visits all expression clauses inside a MATCH_RECOGNIZE block against a
+   * temporary inner scope built from the source relation.
+   *
+   * Clauses visited: PARTITION BY, ORDER BY, every MEASURES expression, every
+   * DEFINE predicate.  If the source is itself a derived relation (subquery,
+   * LATERAL, UNNEST, TABLE()) its body is visited here as well.
+   */
+  private customVisitMatchRecognizeInternals(ctx: PatternRecognitionContext): void {
+    const innerScope: QueryScope = { tables: new Map(), ambiguousKeys: new Set() };
+    this.registerAliasedRelation(ctx.aliasedRelation(), innerScope);
+
+    // Register each DEFINE variable as an alias for the source table so that
+    // pattern variable references like A.price resolve to the source columns.
+    // Pattern variables (A, B, …) are row-level references into the source
+    // relation and are not independent table aliases.
+
+    // @important: since we've registered only one aliased relation as the source,
+    // we rely on the assumption that all variables reference the same source.
+    const sourceTables = [...innerScope.tables.values()];
+    if (sourceTables.length > 0) {
+      const firstSource = sourceTables[0]!;
+      for (const varDef of ctx.variableDefinition()) {
+        const varName = normalizeId(getIdentifierText(varDef.identifier()));
+        if (!innerScope.tables.has(varName)) {
+          innerScope.tables.set(varName, firstSource);
+        }
+      }
+
+      // Register SUBSET variable names so that expressions like U.totalprice
+      // (where U = (C, D) in SUBSET) resolve to the source relation.
+      for (const subsetDef of ctx.subsetDefinition()) {
+        const subsetName = normalizeId(getIdentifierText(subsetDef._name!));
+        if (!innerScope.tables.has(subsetName)) {
+          innerScope.tables.set(subsetName, firstSource);
+        }
+      }
+
+      // Also register any pattern variable from the PATTERN clause that has no
+      // DEFINE entry. In Trino, unlisted variables default to always-match and
+      // are still valid references to the source relation.
+      const rowPattern = ctx.rowPattern();
+      if (rowPattern) this.registerPatternVar(rowPattern, firstSource, innerScope);
+    }
+
+    this.pushQueryScope(innerScope);
+    try {
+      for (const partExpr of ctx._partition) {
+        this.visit(partExpr);
+      }
+      const ob = ctx.orderBy();
+      if (ob) this.visit(ob);
+      for (const measure of ctx.measureDefinition()) {
+        this.visit(measure.expression());
+      }
+      for (const varDef of ctx.variableDefinition()) {
+        this.visit(varDef.expression());
+      }
+    } finally {
+      this.popQueryScope();
+    }
+
+    // Visit the inner source body if it is itself a derived relation.
+    const p = ctx.aliasedRelation().relationPrimary();
+    if (p instanceof SubqueryRelationContext) {
+      this.visit(p.query());
+    } else if (p instanceof LateralContext) {
+      this.visit(p.query());
+    } else if (p instanceof UnnestContext) {
+      for (const expr of p.expression()) {
+        this.visit(expr);
+      }
+    } else if (p instanceof TableFunctionInvocationContext) {
+      this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
+    }
+  }
+
+  /**
+   * Recursively walks a `rowPattern` parse tree and registers every
+   * {@link PatternVariableContext} leaf as an alias for `tableToRegister` in
+   * `scope`, provided the name is not already present.
+   *
+   * Used by {@link customVisitMatchRecognizeInternals} to ensure that pattern
+   * variables declared only in the `PATTERN` clause (i.e. with no `DEFINE`
+   * entry) are still resolvable as column-reference prefixes.
+   */
+  private registerPatternVar(node: RowPatternContext, tableToRegister: ScopeTable, scope: QueryScope): void {
+    if (node instanceof PatternVariableContext) {
+      const varName = normalizeId(getIdentifierText(node.identifier()));
+      if (!scope.tables.has(varName)) {
+        scope.tables.set(varName, tableToRegister);
+      }
+      return;
+    }
+    for (const child of node.children ?? []) {
+      if (child instanceof ParserRuleContext) this.registerPatternVar(child, tableToRegister, scope);
     }
   }
 
@@ -805,6 +920,34 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       return { qualifiedName, columns: meta.columns, kind: "real" };
     }
     return { qualifiedName: rawName, columns: [], kind: "unknown" };
+  }
+
+  /**
+   * Registers a {@link PatternRecognitionContext} into the given scope.
+   *
+   * - When no MATCH_RECOGNIZE clause is present the inner
+   *   {@link AliasedRelationContext} is registered as usual (transparent pass-through).
+   * - When MATCH_RECOGNIZE is present the output is a `'derived'` scope table
+   *   keyed on the outer alias, with its columns taken from the MEASURES
+   *   definitions (or from explicit column aliases if provided).
+   */
+  private registerPatternRecognition(ctx: PatternRecognitionContext, scope: QueryScope): void {
+    if (!ctx.MATCH_RECOGNIZE()) {
+      this.registerAliasedRelation(ctx.aliasedRelation(), scope);
+      return;
+    }
+
+    const aliasCtx = ctx.identifier();
+    const alias = aliasCtx ? getIdentifierText(aliasCtx) : null;
+    const columnAliasCtx = ctx.columnAliases();
+
+    const measureCols = columnAliasCtx
+      ? columnAliasCtx.identifier().map(getIdentifierText)
+      : ctx.measureDefinition().map((m) => getIdentifierText(m.identifier()));
+
+    if (alias) {
+      scope.tables.set(normalizeId(alias), createScopeTable(alias, measureCols, "derived"));
+    }
   }
 
   /**
