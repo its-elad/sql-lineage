@@ -853,7 +853,7 @@ describe("Set operations", () => {
              UNION
              SELECT id, name FROM employees
              UNION
-             SELECT id, name AS name FROM categories`,
+             SELECT id, name FROM categories`,
       [USERS, EMPLOYEES, CATEGORIES]
     );
     expect(result.tableColumns.find((t) => t.table === "users")?.columns).toEqual(["id", "name"]);

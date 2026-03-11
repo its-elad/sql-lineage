@@ -28,7 +28,6 @@ import {
   ColumnReferenceContext,
   DereferenceContext,
   JoinCriteriaContext,
-  OrderByContext,
   PatternRecognitionContext,
   PatternVariableContext,
   RowPatternContext,
@@ -181,7 +180,9 @@ function createScopeTable<K extends ScopeTableKind = "real">(
   const columnsByNormalized = new Map<NormalizedIdBrand, string>();
   for (const col of columns) {
     const key = normalizeId(col);
-    columnsByNormalized.set(key, col);
+    if (!columnsByNormalized.has(key)) {
+      columnsByNormalized.set(key, col);
+    }
   }
   return { qualifiedName, columns, columnsByNormalized, kind };
 }
@@ -196,14 +197,14 @@ function createScopeTable<K extends ScopeTableKind = "real">(
  *
  * Traversal strategy:
  *  1. {@link visitQuery} handles CTEs then delegates to the body.
- *  2. {@link processCtes} pushes a shared CTE scope onto the CTE stack, registers
- *     each CTE as a {@link ScopeTable} with `kind: 'cte'`, visits its body,
- *     and leaves the scope live for the main query body. {@link visitQuery}
- *     pops it afterwards. This means CTE visibility is scoped correctly —
- *     inner WITH clauses cannot leak definitions to outer queries.
- *  3. {@link processQueryNoWith} delegates the term and ORDER BY clause to
- *     {@link processTermAndOrderBy}, which builds a scope from the FROM clause,
- *     visits ORDER BY while the scope is live, and pops the scope.
+ *  2. {@link visitQuery} pushes a CTE scope via {@link pushCteScope} (whose
+ *     returned `Disposable` is held by a `using` declaration), then calls
+ *     {@link registerCtes} to register each CTE with `kind: 'cte'` and visit
+ *     its body. The scope stays live for the main query body and is automatically
+ *     popped when the `using` binding leaves its block. Inner WITH clauses
+ *     therefore cannot leak definitions to outer queries.
+ *  3. {@link visitQueryNoWith} builds a scope from the FROM clause, visits ORDER BY
+ *     while the scope is live, and pops the scope.
  *  4. {@link visitDereference} and {@link visitColumnReference} are the leaf
  *     resolvers — they look up columns in the query-scope stack.
  *  5. {@link visitSelectAll} expands `*` / `table.*` using each scope table's
@@ -231,38 +232,36 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     return this.queryScopeStack.at(-1);
   }
 
-  private pushQueryScope(scope: QueryScope): void {
+  /**
+   * Pushes `scope` onto the query scope stack and returns a `Disposable` that
+   * pops it. Pair with `using` so the scope is always popped when the
+   * enclosing block exits — even on throw.
+   *
+   * @example
+   * ```ts
+   * using _scope = this.pushQueryScope(scope);
+   * // … scope is live until end of this block
+   * ```
+   */
+  private pushQueryScope(scope: QueryScope): Disposable {
     this.queryScopeStack.push(scope);
+    return { [Symbol.dispose]: () => this.queryScopeStack.pop() };
   }
 
-  private popQueryScope(): void {
-    this.queryScopeStack.pop();
-  }
-
-  private pushCteScope(scope: CteScope): void {
+  /**
+   * Pushes `scope` onto the CTE scope stack and returns a `Disposable` that
+   * pops it. Pair with `using` so the scope is always popped when the
+   * enclosing block exits — even on throw.
+   *
+   * @example
+   * ```ts
+   * using _cteScope = this.pushCteScope(cteScope);
+   * // … CTE scope is live until end of this block
+   * ```
+   */
+  private pushCteScope(scope: CteScope): Disposable {
     this.cteScopeStack.push(scope);
-  }
-
-  private popCteScope(): void {
-    this.cteScopeStack.pop();
-  }
-
-  private withQueryScope<T>(scope: QueryScope, fn: () => T): T {
-    this.pushQueryScope(scope);
-    try {
-      return fn();
-    } finally {
-      this.popQueryScope();
-    }
-  }
-
-  private withCteScope<T>(scope: CteScope, fn: () => T): T {
-    this.pushCteScope(scope);
-    try {
-      return fn();
-    } finally {
-      this.popCteScope();
-    }
+    return { [Symbol.dispose]: () => this.cteScopeStack.pop() };
   }
 
   constructor(metadata: TableMetadata[]) {
@@ -270,9 +269,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     this.metadataLookup = buildMetadataLookup(metadata);
   }
 
-  protected defaultResult(): void {
-    return;
-  }
+  protected defaultResult(): void {}
 
   /** Aggregates and returns the final lineage result. */
   getResult(): ColumnLineageResult {
@@ -306,12 +303,13 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     const withCtx = ctx.with();
     if (withCtx) {
       const cteScope: CteScope = { tables: new Map() };
-      this.withCteScope(cteScope, () => {
-        this.processCtes(withCtx, cteScope);
-        this.processQueryNoWith(ctx.queryNoWith());
-      });
+      // `using` guarantees the CTE scope is popped when this if-block exits,
+      // even if an exception is thrown during CTE registration or query traversal.
+      using _cteScope = this.pushCteScope(cteScope);
+      this.registerCtes(withCtx, cteScope);
+      this.visit(ctx.queryNoWith());
     } else {
-      this.processQueryNoWith(ctx.queryNoWith());
+      this.visit(ctx.queryNoWith());
     }
   };
 
@@ -456,7 +454,13 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
   // Query body orchestration
   // ════════════════════════════════════════════════════════════
 
-  private processCtes(withCtx: WithContext, cteScope: CteScope): void {
+  /**
+   * Registers all CTEs in a WITH clause into `cteScope` and visits each body.
+   * The caller is responsible for pushing/popping `cteScope` via `using`.
+   * Each CTE is registered before its body is visited so that chained CTEs
+   * can reference earlier ones through normal scope resolution.
+   */
+  private registerCtes(withCtx: WithContext, cteScope: CteScope): void {
     for (const namedQuery of withCtx.namedQuery()) {
       const cteName = getIdentifierText(namedQuery.identifier());
       const colAliases = namedQuery.columnAliases();
@@ -465,143 +469,63 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
         ? colAliases.identifier().map(getIdentifierText)
         : this.inferQueryOutputColumns(namedQuery.query());
 
-      // Register with kind='cte' before visiting the body so subsequent
-      // CTEs in the same WITH clause can already reference this one.
+      // Register before visiting the body so subsequent CTEs in the same
+      // WITH clause can already reference this one.
       cteScope.tables.set(normalizeId(cteName), createScopeTable(cteName, cols, "cte"));
 
-      this.visit(namedQuery.query());
+      this.visit(namedQuery); // identifier/columnAliases are just names — no column refs
     }
   }
 
   /**
-   * Drives traversal of a WITH-less query body (or the body after CTEs have
-   * been registered). Delegates the query term and ORDER BY clause together to
-   * {@link processTermAndOrderBy}, which handles scope management internally.
+   * Visits the body of a query without a WITH clause. By calling `visit(ctx.queryTerm())`,
+   * this ensures set operations (UNION, INTERSECT, EXCEPT) are traversed, since the default
+   * visitor recursively visits both sides of any set operation.
    */
-  private processQueryNoWith(ctx: QueryNoWithContext): void {
-    this.processTermAndOrderBy(ctx.queryTerm(), ctx.orderBy());
-  }
+  visitQueryNoWith = (ctx: QueryNoWithContext): void => {
+    this.visit(ctx.queryTerm());
+  };
 
-  /**
-   * Processes a single query term and, when provided, visits ORDER BY while
-   * the term's scope is still active, then pops that scope.
-   *
-   * A *term* is the grammar unit that sits between WITH and ORDER BY/LIMIT.
-   * It is either:
-   *  - A **query primary** (`QueryTermDefault`) — one of:
-   *    - A `SELECT` statement (`QueryPrimaryDefault` / `querySpecification`):
-   *      builds a scope from the FROM clause, pushes it, visits all
-   *      column-bearing clauses via {@link customVisitSpecInternals}, visits
-   *      the bodies of any FROM-clause subqueries / UNNEST / TABLE() while
-   *      that scope is active, then visits ORDER BY (if present) and pops
-   *      the scope.
-   *    - A parenthesised subquery (`Subquery`): delegates to
-   *      {@link processQueryNoWith}, which manages its own scope.
-   *  - A **set operation** (`SetOperation` — UNION / EXCEPT / INTERSECT):
-   *    recursively processes the left and right terms, each managing their
-   *    own scope. ORDER BY is not forwarded to recursive calls.
-   */
-  private processTermAndOrderBy(term: QueryTermContext, orderBy?: OrderByContext | null): void {
-    if (term instanceof QueryTermDefaultContext) {
-      const primary = term.queryPrimary();
-
-      if (primary instanceof QueryPrimaryDefaultContext) {
-        const spec = primary.querySpecification();
-        const scope = this.buildScopeFromRelations(spec.relation());
-        this.withQueryScope(scope, () => {
-          this.customVisitSpecInternals(spec);
-
-          // Visit derived-source bodies and MATCH_RECOGNIZE internals after the
-          // scope is live.
-          for (const rel of spec.relation()) {
-            this.forEachPatternRecognition(rel, (patRec) => {
-              if (patRec.MATCH_RECOGNIZE()) {
-                this.customVisitMatchRecognizeInternals(patRec);
-              } else {
-                const aliased = patRec.aliasedRelation();
-                const p = aliased.relationPrimary();
-                if (
-                  p instanceof SubqueryRelationContext ||
-                  p instanceof LateralContext ||
-                  p instanceof UnnestContext ||
-                  p instanceof JsonTableContext
-                ) {
-                  this.visit(p);
-                } else if (p instanceof TableFunctionInvocationContext) {
-                  this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
-                }
-              }
-            });
-          }
-
-          if (orderBy) {
-            this.visit(orderBy);
-          }
-        });
+  
+  visitQueryTermDefault = (ctx: QueryTermDefaultContext): void => {
+    const primary = ctx.queryPrimary();
+    if (primary instanceof QueryPrimaryDefaultContext) {
+      const spec = primary.querySpecification();
+      using _scope = this.pushQueryScope(this.buildScopeFromRelations(spec.relation()));
+      this.visit(spec);
+      // ORDER BY is a sibling of queryTerm inside queryNoWith, not a child of queryPrimary.
+      // Visit it only when this term is the direct body of a queryNoWith (not a set-op side).
+      if (ctx.parent instanceof QueryNoWithContext) {
+        const ob = ctx.parent.orderBy();
+        if (ob) this.visit(ob);
       }
+    } else if (primary instanceof SubqueryContext) {
+      this.visit(primary.queryNoWith());
+    }
+  };
 
-      if (primary instanceof SubqueryContext) {
-        this.processQueryNoWith(primary.queryNoWith());
+  visitJoinRelation = (ctx: JoinRelationContext): void => {
+    const criteria = ctx.joinCriteria();
+    if (criteria) this.visit(criteria);
+    for (const child of ctx.relation()) {
+      this.visit(child);
+    }
+    const sampledRelation = ctx.sampledRelation();
+    if (sampledRelation) this.visit(sampledRelation);
+  };
+
+  visitPatternRecognition = (ctx: PatternRecognitionContext): void => {
+    if (ctx.MATCH_RECOGNIZE()) {
+      this.customVisitMatchRecognizeInternals(ctx);
+    } else {
+      const p = ctx.aliasedRelation().relationPrimary();
+      if (p instanceof TableFunctionInvocationContext) {
+        this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
+      } else if (!(p instanceof TableNameContext)) {
+        this.visit(p);
       }
     }
-
-    if (term instanceof SetOperationContext) {
-      if (term._left) {
-        this.processTermAndOrderBy(term._left);
-      }
-      if (term._right) {
-        this.processTermAndOrderBy(term._right);
-      }
-    }
-  }
-
-  private customVisitJoinConditions(rel: JoinRelationContext): void {
-    const criteria = rel.joinCriteria();
-    if (criteria) {
-      this.visit(criteria);
-    }
-    for (const child of rel.relation()) {
-      if (child instanceof JoinRelationContext) {
-        this.customVisitJoinConditions(child);
-      }
-    }
-  }
-
-  /**
-   * Visits all clauses of a `SELECT` specification that resolve column
-   * references against the current scope: SELECT list, WHERE, HAVING,
-   * GROUP BY, window definitions, and JOIN ON/USING conditions.
-   *
-   * Deliberately excludes two things that `visitChildren` would also reach:
-   *  - **Derived source bodies** (subquery, LATERAL, UNNEST, TABLE() in FROM):
-   *    handled by {@link processTermAndOrderBy} after this call, so each body gets its
-   *    own child scope pushed and popped independently.
-   *  - **ORDER BY**: a sibling of the term in the grammar, visited by
-   *    {@link processTermAndOrderBy} while the scope is still live.
-   */
-  private customVisitSpecInternals(spec: QuerySpecificationContext): void {
-    for (const item of spec.selectItem()) {
-      this.visit(item);
-    }
-    if (spec._where) {
-      this.visit(spec._where);
-    }
-    if (spec._having) {
-      this.visit(spec._having);
-    }
-    const groupBy = spec.groupBy();
-    if (groupBy) {
-      this.visit(groupBy);
-    }
-    for (const window of spec.windowDefinition()) {
-      this.visit(window);
-    }
-    for (const relation of spec.relation()) {
-      if (relation instanceof JoinRelationContext) {
-        this.customVisitJoinConditions(relation);
-      }
-    }
-  }
+  };
 
   // ════════════════════════════════════════════════════════════
   // Result recording & Column resolution
@@ -645,8 +569,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     const normalizedColumn = normalizeId(column);
     const originalColumnName = table.columnsByNormalized.get(normalizedColumn);
     if (table.kind === "unknown" || !originalColumnName) {
-      const unresolvedColumn = { table: table.qualifiedName, column: normalizedColumn };
-      this.unresolvedColumns.add(unresolvedColumn);
+      this.unresolvedColumns.add({ table: table.qualifiedName, column: normalizedColumn });
     } else if (table.kind === "real") {
       const tableId = normalizeId(table.qualifiedName);
       let entry = this.resultEntries.get(tableId);
@@ -873,15 +796,27 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
 
     // Visit PARTITION BY, ORDER BY, MEASURES, DEFINE, etc... against the inner scope so
     // pattern variable references resolve to the source columns.
-    this.withQueryScope(innerScope, () => {
-      this.visit(ctx);
-    });
+    {
+      // Explicit block so the scope is disposed before visiting the source body below.
+      using _scope = this.pushQueryScope(innerScope);
+      for (const partExpr of ctx._partition) {
+        this.visit(partExpr);
+      }
+      const ob = ctx.orderBy();
+      if (ob) this.visit(ob);
+      for (const measure of ctx.measureDefinition()) {
+        this.visit(measure);
+      }
+      for (const varDef of ctx.variableDefinition()) {
+        this.visit(varDef);
+      }
+    }
 
     // Visit the inner source body if it is itself a derived relation.
     const p = ctx.aliasedRelation().relationPrimary();
     if (p instanceof TableFunctionInvocationContext) {
       this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
-    } else if (p) {
+    } else if (!(p instanceof TableNameContext)) {
       this.visit(p);
     }
   }
@@ -1064,34 +999,15 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
           if (argAliasCtx) {
             tempScope.tables.set(normalizeId(getIdentifierText(argAliasCtx)), scopeTable);
           }
-          this.withQueryScope(tempScope, () => {
-            for (const expr of tableArg.expression()) {
-              this.visit(expr);
-            }
-            for (const item of tableArg.sortItem()) {
-              this.visit(item);
-            }
-          });
+          using _scope = this.pushQueryScope(tempScope);
+          this.visit(tableArg); // visits PARTITION BY expressions and ORDER BY sort items; qualifiedName/identifier produce no col refs
         } else if (rel instanceof TableArgumentQueryContext) {
-          this.visit(rel.query());
+          this.visit(rel); // visitChildren reaches rel.query() → visitQuery
         }
       } else {
         const expr = arg.expression();
         if (expr) this.visit(expr);
       }
-    }
-  }
-
-  /**
-   * Visits expression-bearing clauses inside a JSON_TABLE invocation.
-   *
-   * This captures references from the source JSON expression (e.g. `o.payload`)
-   * and from optional DEFAULT expressions in column definitions.
-   */
-  private customVisitJsonTableInternals(ctx: JsonTableContext): void {
-    this.visit(ctx.jsonPathInvocation());
-    for (const column of ctx.jsonTableColumn()) {
-      this.visit(column);
     }
   }
 
@@ -1142,8 +1058,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       const primary = term.queryPrimary();
       if (primary instanceof QueryPrimaryDefaultContext) {
         return this.inferSpecOutputColumns(primary.querySpecification());
-      }
-      if (primary instanceof SubqueryContext) {
+      } else if (primary instanceof SubqueryContext) {
         return this.inferTermOutputColumns(primary.queryNoWith().queryTerm());
       }
     }
