@@ -181,9 +181,7 @@ function createScopeTable<K extends ScopeTableKind = "real">(
   const columnsByNormalized = new Map<NormalizedIdBrand, string>();
   for (const col of columns) {
     const key = normalizeId(col);
-    if (!columnsByNormalized.has(key)) {
-      columnsByNormalized.set(key, col);
-    }
+    columnsByNormalized.set(key, col);
   }
   return { qualifiedName, columns, columnsByNormalized, kind };
 }
@@ -249,6 +247,24 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     this.cteScopeStack.pop();
   }
 
+  private withQueryScope<T>(scope: QueryScope, fn: () => T): T {
+    this.pushQueryScope(scope);
+    try {
+      return fn();
+    } finally {
+      this.popQueryScope();
+    }
+  }
+
+  private withCteScope<T>(scope: CteScope, fn: () => T): T {
+    this.pushCteScope(scope);
+    try {
+      return fn();
+    } finally {
+      this.popCteScope();
+    }
+  }
+
   constructor(metadata: TableMetadata[]) {
     super();
     this.metadataLookup = buildMetadataLookup(metadata);
@@ -289,9 +305,11 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
   visitQuery = (ctx: QueryContext): void => {
     const withCtx = ctx.with();
     if (withCtx) {
-      this.processCtes(withCtx); // pushes the CTE scope
-      this.processQueryNoWith(ctx.queryNoWith());
-      this.popCteScope(); // pop the CTE scope
+      const cteScope: CteScope = { tables: new Map() };
+      this.withCteScope(cteScope, () => {
+        this.processCtes(withCtx, cteScope);
+        this.processQueryNoWith(ctx.queryNoWith());
+      });
     } else {
       this.processQueryNoWith(ctx.queryNoWith());
     }
@@ -438,13 +456,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
   // Query body orchestration
   // ════════════════════════════════════════════════════════════
 
-  private processCtes(withCtx: WithContext): void {
-    // Push a dedicated scope for all CTEs in this WITH clause.
-    // Registering each CTE before visiting its body means chained CTEs can
-    // reference earlier ones via normal scope resolution.
-    const cteScope: CteScope = { tables: new Map() };
-    this.pushCteScope(cteScope);
-
+  private processCtes(withCtx: WithContext, cteScope: CteScope): void {
     for (const namedQuery of withCtx.namedQuery()) {
       const cteName = getIdentifierText(namedQuery.identifier());
       const colAliases = namedQuery.columnAliases();
@@ -459,7 +471,6 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
 
       this.visit(namedQuery.query());
     }
-    // cteScope stays on the stack — visitQuery pops it after the query body.
   }
 
   /**
@@ -497,40 +508,36 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       if (primary instanceof QueryPrimaryDefaultContext) {
         const spec = primary.querySpecification();
         const scope = this.buildScopeFromRelations(spec.relation());
-        this.pushQueryScope(scope);
+        this.withQueryScope(scope, () => {
+          this.customVisitSpecInternals(spec);
 
-        this.customVisitSpecInternals(spec);
-
-        // Visit derived-source bodies and MATCH_RECOGNIZE internals after the
-        // scope is live.
-        for (const rel of spec.relation()) {
-          this.forEachPatternRecognition(rel, (patRec) => {
-            if (patRec.MATCH_RECOGNIZE()) {
-              this.customVisitMatchRecognizeInternals(patRec);
-            } else {
-              const aliased = patRec.aliasedRelation();
-              const p = aliased.relationPrimary();
-              if (p instanceof SubqueryRelationContext) {
-                this.visit(p.query());
-              } else if (p instanceof LateralContext) {
-                this.visit(p.query());
-              } else if (p instanceof UnnestContext) {
-                for (const expr of p.expression()) {
-                  this.visit(expr);
+          // Visit derived-source bodies and MATCH_RECOGNIZE internals after the
+          // scope is live.
+          for (const rel of spec.relation()) {
+            this.forEachPatternRecognition(rel, (patRec) => {
+              if (patRec.MATCH_RECOGNIZE()) {
+                this.customVisitMatchRecognizeInternals(patRec);
+              } else {
+                const aliased = patRec.aliasedRelation();
+                const p = aliased.relationPrimary();
+                if (
+                  p instanceof SubqueryRelationContext ||
+                  p instanceof LateralContext ||
+                  p instanceof UnnestContext ||
+                  p instanceof JsonTableContext
+                ) {
+                  this.visit(p);
+                } else if (p instanceof TableFunctionInvocationContext) {
+                  this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
                 }
-              } else if (p instanceof TableFunctionInvocationContext) {
-                this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
-              } else if (p instanceof JsonTableContext) {
-                this.customVisitJsonTableInternals(p);
               }
-            }
-          });
-        }
+            });
+          }
 
-        if (orderBy) {
-          this.visit(orderBy);
-        }
-        this.popQueryScope();
+          if (orderBy) {
+            this.visit(orderBy);
+          }
+        });
       }
 
       if (primary instanceof SubqueryContext) {
@@ -639,9 +646,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     const originalColumnName = table.columnsByNormalized.get(normalizedColumn);
     if (table.kind === "unknown" || !originalColumnName) {
       const unresolvedColumn = { table: table.qualifiedName, column: normalizedColumn };
-      if (!this.unresolvedColumns.has(unresolvedColumn)) {
-        this.unresolvedColumns.add(unresolvedColumn);
-      }
+      this.unresolvedColumns.add(unresolvedColumn);
     } else if (table.kind === "real") {
       const tableId = normalizeId(table.qualifiedName);
       let entry = this.resultEntries.get(tableId);
@@ -866,37 +871,18 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       if (rowPattern) this.registerPatternVar(rowPattern, firstSource, innerScope);
     }
 
-    this.pushQueryScope(innerScope);
-    try {
-      for (const partExpr of ctx._partition) {
-        this.visit(partExpr);
-      }
-      const ob = ctx.orderBy();
-      if (ob) this.visit(ob);
-      for (const measure of ctx.measureDefinition()) {
-        this.visit(measure.expression());
-      }
-      for (const varDef of ctx.variableDefinition()) {
-        this.visit(varDef.expression());
-      }
-    } finally {
-      this.popQueryScope();
-    }
+    // Visit PARTITION BY, ORDER BY, MEASURES, DEFINE, etc... against the inner scope so
+    // pattern variable references resolve to the source columns.
+    this.withQueryScope(innerScope, () => {
+      this.visit(ctx);
+    });
 
     // Visit the inner source body if it is itself a derived relation.
     const p = ctx.aliasedRelation().relationPrimary();
-    if (p instanceof SubqueryRelationContext) {
-      this.visit(p.query());
-    } else if (p instanceof LateralContext) {
-      this.visit(p.query());
-    } else if (p instanceof UnnestContext) {
-      for (const expr of p.expression()) {
-        this.visit(expr);
-      }
-    } else if (p instanceof TableFunctionInvocationContext) {
+    if (p instanceof TableFunctionInvocationContext) {
       this.customVisitTableFunctionCallArguments(p.tableFunctionCall());
-    } else if (p instanceof JsonTableContext) {
-      this.customVisitJsonTableInternals(p);
+    } else if (p) {
+      this.visit(p);
     }
   }
 
@@ -1022,16 +1008,9 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       if (!scope.tables.has(normalizedName)) {
         scope.tables.set(normalizedName, scopeTable);
       }
-    } else if (primary instanceof SubqueryRelationContext) {
+    } else if (primary instanceof SubqueryRelationContext || primary instanceof LateralContext) {
       this.registerSubquerySource(primary.query(), alias, columnAliasCtx, scope);
-    } else if (primary instanceof LateralContext) {
-      this.registerSubquerySource(primary.query(), alias, columnAliasCtx, scope);
-    } else if (primary instanceof UnnestContext) {
-      if (alias) {
-        const columns = columnAliasCtx ? columnAliasCtx.identifier().map(getIdentifierText) : [];
-        scope.tables.set(normalizeId(alias), createScopeTable(alias, columns, "derived"));
-      }
-    } else if (primary instanceof TableFunctionInvocationContext) {
+    } else if (primary instanceof UnnestContext || primary instanceof TableFunctionInvocationContext) {
       if (alias) {
         const columns = columnAliasCtx ? columnAliasCtx.identifier().map(getIdentifierText) : [];
         scope.tables.set(normalizeId(alias), createScopeTable(alias, columns, "derived"));
@@ -1043,11 +1022,13 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
         if (columnAliasCtx) {
           columns = columnAliasCtx.identifier().map(getIdentifierText);
         } else {
-          columns = primary.jsonTableColumn()
-            .filter((c): c is OrdinalityColumnContext | ValueColumnContext | QueryColumnContext =>
-              c instanceof OrdinalityColumnContext ||
-              c instanceof ValueColumnContext ||
-              c instanceof QueryColumnContext
+          columns = primary
+            .jsonTableColumn()
+            .filter(
+              (c): c is OrdinalityColumnContext | ValueColumnContext | QueryColumnContext =>
+                c instanceof OrdinalityColumnContext ||
+                c instanceof ValueColumnContext ||
+                c instanceof QueryColumnContext
             )
             .map((c) => getIdentifierText(c.identifier()));
         }
@@ -1083,16 +1064,14 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
           if (argAliasCtx) {
             tempScope.tables.set(normalizeId(getIdentifierText(argAliasCtx)), scopeTable);
           }
-          this.pushQueryScope(tempScope);
-
-          for (const expr of tableArg.expression()) {
-            this.visit(expr);
-          }
-          for (const item of tableArg.sortItem()) {
-            this.visit(item);
-          }
-
-          this.popQueryScope();
+          this.withQueryScope(tempScope, () => {
+            for (const expr of tableArg.expression()) {
+              this.visit(expr);
+            }
+            for (const item of tableArg.sortItem()) {
+              this.visit(item);
+            }
+          });
         } else if (rel instanceof TableArgumentQueryContext) {
           this.visit(rel.query());
         }
