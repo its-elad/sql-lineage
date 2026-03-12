@@ -49,7 +49,7 @@ Each `ScopeTable` carries:
    - **Subquery / LATERAL** → registered as `'derived'` with inferred output columns; body is visited separately with its own scope.
    - **UNNEST / TABLE function** → registered as `'derived'` with any declared column aliases.
    - **MATCH_RECOGNIZE** → registers a derived table with columns from MEASURES or explicit output aliases; pattern/subset variables are registered as aliases for the source table.
-   - **JsonTable** → if aliased, registers a derived table with columns from explicit aliases or JSON table columns.
+   - **JsonTable** → Registers a derived table with columns from explicit aliases or JSON table columns.
 5. **MATCH_RECOGNIZE internals** — visits PARTITION BY, ORDER BY, MEASURES, and DEFINE clauses in a temporary inner scope, registering pattern and subset variables as aliases for the source table.
 6. Derived-source bodies (subqueries, LATERAL, UNNEST expressions, table function arguments) are visited **after** the scope is pushed, so the outer scope is available for correlated references.
 

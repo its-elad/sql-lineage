@@ -1,6 +1,6 @@
 {
   "name": "@sql-lineage/core",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Extract column and table lineage from Trino SQL queries using the official Trino ANTLR4 grammar",
   "license": "MIT",
   "keywords": [
