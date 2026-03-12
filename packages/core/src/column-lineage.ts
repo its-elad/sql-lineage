@@ -265,7 +265,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     return { [Symbol.dispose]: () => this.cteScopeStack.pop() };
   }
 
-  private getUniqueDerivedTableName(): string {
+  private getUniqueDerivedTableName(): `__derived_table_${string}` {
     return `__derived_table_${uuid()}`;
   }
 
