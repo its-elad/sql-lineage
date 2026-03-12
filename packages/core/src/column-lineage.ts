@@ -45,6 +45,7 @@ import {
   flattenDereference,
   extractColumnName,
   NormalizedIdBrand,
+  uuid,
 } from "./utils.js";
 import { HashSet } from "./hashset.js";
 
@@ -262,6 +263,10 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
   private pushCteScope(scope: CteScope): Disposable {
     this.cteScopeStack.push(scope);
     return { [Symbol.dispose]: () => this.cteScopeStack.pop() };
+  }
+
+  private getUniqueDerivedTableName(): string {
+    return `__derived_table_${uuid()}`;
   }
 
   constructor(metadata: TableMetadata[]) {
@@ -486,7 +491,6 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     this.visit(ctx.queryTerm());
   };
 
-  
   visitQueryTermDefault = (ctx: QueryTermDefaultContext): void => {
     const primary = ctx.queryPrimary();
     if (primary instanceof QueryPrimaryDefaultContext) {
@@ -669,13 +673,26 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
    */
   private tryResolveAndRecordUnqualifiedColumn(columnName: string): boolean {
     const normalized = normalizeId(columnName);
-    for (const scope of this.queryScopeStack.toReversed()) {
+    for (const [scopeIndex, scope] of this.queryScopeStack.toReversed().entries()) {
+      const isCurrentScope = scopeIndex === 0
       // Collect all *distinct* ScopeTable objects in this scope that own the column.
       const matches: Array<{ table: ScopeTable; originalColumnName: string }> = [];
       const seenTables = new Set<NormalizedIdBrand>();
       for (const table of scope.tables.values()) {
         const tableKey = normalizeId(table.qualifiedName);
-        if (seenTables.has(tableKey) || table.kind === "derived") continue;
+        // Resolution rule for bare column names:
+        // 1) In the current scope, include derived tables so unnamed derived
+        //    sources (subquery/lateral/json_table/match_recognize outputs)
+        //    can resolve and then be silently dropped by recordColumn.
+        // 2) In outer scopes, skip derived tables so we do not incorrectly
+        //    satisfy an inner bare reference from an ancestor derived output.
+        //
+        // Example regression this avoids:
+        //   SELECT id FROM (SELECT id FROM myschema.users) x
+        // with no metadata. Inner SELECT records unresolved myschema.users.id.
+        // The outer bare id should remain unresolved, not be treated as
+        // resolved-via-derived from x when falling back to an outer scope.
+        if (seenTables.has(tableKey) || (!isCurrentScope && table.kind === "derived")) continue;
         seenTables.add(tableKey);
         const originalColumnName = table.columnsByNormalized.get(normalized);
         if (originalColumnName) {
@@ -882,16 +899,14 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     }
 
     const aliasCtx = ctx.identifier();
-    const alias = aliasCtx ? getIdentifierText(aliasCtx) : null;
+    const aliasOrName = aliasCtx ? getIdentifierText(aliasCtx) : this.getUniqueDerivedTableName();
     const columnAliasCtx = ctx.columnAliases();
 
     const measureCols = columnAliasCtx
       ? columnAliasCtx.identifier().map(getIdentifierText)
       : ctx.measureDefinition().map((m) => getIdentifierText(m.identifier()));
 
-    if (alias) {
-      scope.tables.set(normalizeId(alias), createScopeTable(alias, measureCols, "derived"));
-    }
+    scope.tables.set(normalizeId(aliasOrName), createScopeTable(aliasOrName, measureCols, "derived"));
   }
 
   /**
@@ -944,31 +959,31 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
         scope.tables.set(normalizedName, scopeTable);
       }
     } else if (primary instanceof SubqueryRelationContext || primary instanceof LateralContext) {
-      this.registerSubquerySource(primary.query(), alias, columnAliasCtx, scope);
+      const aliasOrName = alias ?? this.getUniqueDerivedTableName();
+      const columns = columnAliasCtx
+        ? columnAliasCtx.identifier().map(getIdentifierText)
+        : this.inferQueryOutputColumns(primary.query());
+
+      scope.tables.set(normalizeId(aliasOrName), createScopeTable(aliasOrName, columns, "derived"));
     } else if (primary instanceof UnnestContext || primary instanceof TableFunctionInvocationContext) {
-      if (alias) {
-        const columns = columnAliasCtx ? columnAliasCtx.identifier().map(getIdentifierText) : [];
-        scope.tables.set(normalizeId(alias), createScopeTable(alias, columns, "derived"));
-      }
+      const aliasOrName = alias ?? this.getUniqueDerivedTableName();
+      const columns = columnAliasCtx ? columnAliasCtx.identifier().map(getIdentifierText) : [];
+      scope.tables.set(normalizeId(aliasOrName), createScopeTable(aliasOrName, columns, "derived"));
     } else if (primary instanceof JsonTableContext) {
-      // if there is no alias, the source table is not addressable at all
-      if (alias) {
-        let columns: string[] = [];
-        if (columnAliasCtx) {
-          columns = columnAliasCtx.identifier().map(getIdentifierText);
-        } else {
-          columns = primary
-            .jsonTableColumn()
-            .filter(
-              (c): c is OrdinalityColumnContext | ValueColumnContext | QueryColumnContext =>
-                c instanceof OrdinalityColumnContext ||
-                c instanceof ValueColumnContext ||
-                c instanceof QueryColumnContext
-            )
-            .map((c) => getIdentifierText(c.identifier()));
-        }
-        scope.tables.set(normalizeId(alias), createScopeTable(alias, columns, "derived"));
+      const aliasOrName = alias ?? this.getUniqueDerivedTableName();
+      let columns: string[] = [];
+      if (columnAliasCtx) {
+        columns = columnAliasCtx.identifier().map(getIdentifierText);
+      } else {
+        columns = primary
+          .jsonTableColumn()
+          .filter(
+            (c): c is OrdinalityColumnContext | ValueColumnContext | QueryColumnContext =>
+              c instanceof OrdinalityColumnContext || c instanceof ValueColumnContext || c instanceof QueryColumnContext
+          )
+          .map((c) => getIdentifierText(c.identifier()));
       }
+      scope.tables.set(normalizeId(aliasOrName), createScopeTable(aliasOrName, columns, "derived"));
     }
   }
 
@@ -1009,22 +1024,6 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
         if (expr) this.visit(expr);
       }
     }
-  }
-
-  /** Registers a subquery (or LATERAL) source in the scope. */
-  private registerSubquerySource(
-    queryCtx: QueryContext,
-    alias: string | null,
-    columnAliasCtx: ReturnType<AliasedRelationContext["columnAliases"]>,
-    scope: QueryScope
-  ): void {
-    if (!alias) return; // subqueries in FROM must be aliased
-
-    const columns = columnAliasCtx
-      ? columnAliasCtx.identifier().map(getIdentifierText)
-      : this.inferQueryOutputColumns(queryCtx);
-
-    scope.tables.set(normalizeId(alias), createScopeTable(alias, columns, "derived"));
   }
 
   // ════════════════════════════════════════════════════════════

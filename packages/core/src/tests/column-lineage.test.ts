@@ -618,6 +618,20 @@ describe("Subqueries", () => {
     });
   });
 
+  test("unnamed derived subquery — unqualified output columns are treated as derived (not unresolved)", () => {
+    const POKEMON = tbl("pokemon", ["name", "type", "level"]);
+    const result = run(
+      `SELECT new_name, new_type, level
+       FROM (SELECT name AS new_name, type AS new_type, level FROM pokemon)`,
+      [POKEMON]
+    );
+
+    expect(result).toEqual({
+      tableColumns: [{ table: "pokemon", columns: ["level", "name", "type"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
   test("non-correlated subquery in WHERE (IN)", () => {
     const result = run(
       `SELECT id, name
@@ -708,6 +722,23 @@ describe("Subqueries", () => {
     expect(result.tableColumns.find((t) => t.table === "users")?.columns).toContain("id");
     expect(result.tableColumns.find((t) => t.table === "user_tags")?.columns).toContain("tag");
     expect(result.tableColumns.find((t) => t.table === "user_tags")?.columns).toContain("user_id");
+  });
+
+  test("unnamed LATERAL subquery — unqualified output columns are treated as derived (not unresolved)", () => {
+    const result = run(
+      `SELECT u.id, tag
+       FROM users u,
+            LATERAL (SELECT tag FROM user_tags WHERE user_id = u.id)`,
+      [USERS, USER_TAGS]
+    );
+
+    expect(result).toEqual({
+      tableColumns: [
+        { table: "user_tags", columns: ["tag", "user_id"] },
+        { table: "users", columns: ["id"] },
+      ],
+      unresolvedTableColumns: [],
+    });
   });
 });
 
@@ -1579,6 +1610,20 @@ describe("JSON_TABLE", () => {
   const ORDERS_WITH_PAYLOAD = tbl("orders", ["id", "payload", "status"]);
   const ORDERS_WITH_JSON_COLUMNS = tbl("orders", ["id", "payload", "payload_text", "status"]);
 
+  test("JSON_TABLE without alias — unqualified output columns are treated as derived (not unresolved)", () => {
+    const result = run(
+      `SELECT id
+       FROM JSON_TABLE('[{"id":1}]', 'lax $[*]' COLUMNS (
+         id BIGINT PATH 'lax $.id'
+       ))`
+    );
+
+    expect(result).toEqual({
+      tableColumns: [],
+      unresolvedTableColumns: [],
+    });
+  });
+
   test("JSON_TABLE source expression from a real table is tracked", () => {
     const result = run(
       `SELECT jt.id
@@ -2239,6 +2284,24 @@ describe("MATCH_RECOGNIZE", () => {
     );
     expect(result).toEqual({
       tableColumns: [{ table: "ticker", columns: ["price", "symbol"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
+  test("MATCH_RECOGNIZE without alias — unqualified measure output is treated as derived (not unresolved)", () => {
+    const result = run(
+      `SELECT first_price
+       FROM ticker MATCH_RECOGNIZE (
+         MEASURES FIRST(A.price) AS first_price
+         ONE ROW PER MATCH
+         PATTERN (A+)
+         DEFINE A AS price > 0
+       )`,
+      [TICKER]
+    );
+
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["price"] }],
       unresolvedTableColumns: [],
     });
   });
