@@ -1776,6 +1776,31 @@ describe("Obscure & Edge Cases: Schema, Metadata, SQL", () => {
     });
   });
 
+  test("outer derived table does not satisfy inner subquery's bare column", () => {
+    // Outer query defines a derived table 'x' with column 'id'
+    // Inner subquery SELECT id FROM y should not resolve 'id' to 'x'
+    const meta = tbl("y", ["id"]);
+    const result = run(`SELECT id FROM (SELECT id FROM y) sub, (SELECT 1 AS id) x`, [meta]);
+    expect(result).toEqual({
+      tableColumns: [{ table: "y", columns: ["id"] }],
+      unresolvedTableColumns: [{ column: "id" }],
+    });
+  });
+
+  test("qualified correlated ref to outer derived alias is allowed and transparent", () => {
+    const meta = tbl("users", ["id"]);
+    const result = run(
+      `SELECT *
+       FROM (SELECT id FROM users) x
+       WHERE EXISTS (SELECT 1 WHERE x.id > 0)`,
+      [meta]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "users", columns: ["id"] }],
+      unresolvedTableColumns: [],
+    });
+  });
+
   test("ambiguous alias shadowing table name", () => {
     const meta = tbl("users", ["id", "name"]);
     const result = run(`SELECT users.id FROM users users`, [meta]);
@@ -2320,9 +2345,7 @@ describe("MATCH_RECOGNIZE", () => {
     );
     expect(result).toEqual({
       tableColumns: [],
-      unresolvedTableColumns: [
-        { table: "unknown_tbl", column: "col1" },
-      ],
+      unresolvedTableColumns: [{ table: "unknown_tbl", column: "col1" }],
     });
   });
 
@@ -2488,26 +2511,23 @@ describe("MATCH_RECOGNIZE", () => {
     });
   });
 
-  test(
-    "pattern variable not listed in DEFINE resolves to source table",
-    () => {
-      // C is a valid pattern variable (unlisted variables default to always-match
-      // in Trino). Even though C has no DEFINE entry, C.price should resolve
-      // to ticker.price.
-      const result = run(
-        `SELECT m.p
+  test("pattern variable not listed in DEFINE resolves to source table", () => {
+    // C is a valid pattern variable (unlisted variables default to always-match
+    // in Trino). Even though C has no DEFINE entry, C.price should resolve
+    // to ticker.price.
+    const result = run(
+      `SELECT m.p
          FROM ticker MATCH_RECOGNIZE (
            MEASURES C.price AS p
            ONE ROW PER MATCH
            PATTERN (C+)
            DEFINE A AS 1 = 1
          ) AS m`,
-        [TICKER]
-      );
-      expect(result).toEqual({
-        tableColumns: [{ table: "ticker", columns: ["price"] }],
-        unresolvedTableColumns: [],
-      });
-    }
-  );
+      [TICKER]
+    );
+    expect(result).toEqual({
+      tableColumns: [{ table: "ticker", columns: ["price"] }],
+      unresolvedTableColumns: [],
+    });
+  });
 });

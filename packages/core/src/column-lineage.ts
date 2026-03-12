@@ -674,7 +674,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
   private tryResolveAndRecordUnqualifiedColumn(columnName: string): boolean {
     const normalized = normalizeId(columnName);
     for (const [scopeIndex, scope] of this.queryScopeStack.toReversed().entries()) {
-      const isCurrentScope = scopeIndex === 0
+      const isCurrentScope = scopeIndex === 0;
       // Collect all *distinct* ScopeTable objects in this scope that own the column.
       const matches: Array<{ table: ScopeTable; originalColumnName: string }> = [];
       const seenTables = new Set<NormalizedIdBrand>();
@@ -686,6 +686,8 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
         //    can resolve and then be silently dropped by recordColumn.
         // 2) In outer scopes, skip derived tables so we do not incorrectly
         //    satisfy an inner bare reference from an ancestor derived output.
+        //    (It Is Not Allowed for an outer scope's derived table
+        //     to resolve a reference in an inner derived table)
         //
         // Example regression this avoids:
         //   SELECT id FROM (SELECT id FROM myschema.users) x
@@ -918,6 +920,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
     const aliasCtx = ctx.identifier();
     const alias = aliasCtx ? getIdentifierText(aliasCtx) : null;
     const columnAliasCtx = ctx.columnAliases();
+    const columnAliases = columnAliasCtx ? columnAliasCtx.identifier().map(getIdentifierText) : null;
 
     if (primary instanceof TableNameContext) {
       const nameParts = getQualifiedNameParts(primary.qualifiedName());
@@ -925,7 +928,7 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       const normalizedName = normalizeId(rawName);
 
       const source = this.resolveTableSource(normalizedName, rawName);
-      const columns = columnAliasCtx ? columnAliasCtx.identifier().map(getIdentifierText) : source.columns;
+      const columns = columnAliases ?? source.columns;
 
       const scopeTable = createScopeTable(source.qualifiedName, columns, source.kind);
 
@@ -960,20 +963,18 @@ class ColumnLineageVisitor extends SqlBaseVisitor<void> {
       }
     } else if (primary instanceof SubqueryRelationContext || primary instanceof LateralContext) {
       const aliasOrName = alias ?? this.getUniqueDerivedTableName();
-      const columns = columnAliasCtx
-        ? columnAliasCtx.identifier().map(getIdentifierText)
-        : this.inferQueryOutputColumns(primary.query());
+      const columns = columnAliases ?? this.inferQueryOutputColumns(primary.query());
 
       scope.tables.set(normalizeId(aliasOrName), createScopeTable(aliasOrName, columns, "derived"));
     } else if (primary instanceof UnnestContext || primary instanceof TableFunctionInvocationContext) {
       const aliasOrName = alias ?? this.getUniqueDerivedTableName();
-      const columns = columnAliasCtx ? columnAliasCtx.identifier().map(getIdentifierText) : [];
+      const columns = columnAliases ?? [];
       scope.tables.set(normalizeId(aliasOrName), createScopeTable(aliasOrName, columns, "derived"));
     } else if (primary instanceof JsonTableContext) {
       const aliasOrName = alias ?? this.getUniqueDerivedTableName();
       let columns: string[] = [];
-      if (columnAliasCtx) {
-        columns = columnAliasCtx.identifier().map(getIdentifierText);
+      if (columnAliases) {
+        columns = columnAliases;
       } else {
         columns = primary
           .jsonTableColumn()
