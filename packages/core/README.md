@@ -126,6 +126,181 @@ For a detailed walkthrough of the parsing pipeline, scope model, traversal order
 
 ---
 
+### `getColumnLevelLineage(sql, metadata, options?)`
+
+An **OpenLineage-compatible** column-level lineage analyzer that produces a structured `inputs` / `outputs` result with per-column attribution *and* dataset-level dependency tracking.
+
+```typescript
+import { getColumnLevelLineage } from '@sql-lineage/core';
+
+const metadata = [
+  { tableName: 'users',  columns: ['id', 'name', 'email', 'status'] },
+  { tableName: 'orders', columns: ['id', 'user_id', 'amount', 'created_at'] },
+];
+
+getColumnLevelLineage(`
+  SELECT u.name, o.amount
+  FROM users u
+  JOIN orders o ON u.id = o.user_id
+  WHERE u.status = 'active'
+`, metadata, { defaultNamespace: 'trino://prod' });
+// →
+// {
+//   inputs: [
+//     { namespace: "trino://prod", name: "orders" },
+//     { namespace: "trino://prod", name: "users" },
+//   ],
+//   outputs: [{
+//     namespace: "trino://prod",
+//     name: "__query_result__",
+//     facets: {
+//       columnLineage: {
+//         fields: {
+//           name:   { inputFields: [{ namespace: "trino://prod", name: "users", field: "name" }] },
+//           amount: { inputFields: [{ namespace: "trino://prod", name: "orders", field: "amount" }] },
+//         },
+//         dataset: [
+//           { namespace: "trino://prod", name: "users", field: "id" },
+//           { namespace: "trino://prod", name: "orders", field: "user_id" },
+//           { namespace: "trino://prod", name: "users", field: "status" },
+//         ]
+//       }
+//     }
+//   }]
+// }
+```
+
+#### Options
+
+```typescript
+interface ColumnLevelLineageOptions {
+  /** Namespace for all datasets (e.g. "trino://prod"). Defaults to "". */
+  defaultNamespace?: string;
+  /** Name for the output dataset. Defaults to "__query_result__". */
+  outputName?: string;
+  /** Namespace for the output dataset. Falls back to defaultNamespace. */
+  outputNamespace?: string;
+}
+```
+
+#### Result shape
+
+```typescript
+interface ColumnLevelLineageResult {
+  inputs: DatasetRef[];          // All upstream datasets, sorted by namespace then name
+  outputs: DatasetWithFacets[];  // Always exactly one entry (the output dataset)
+}
+
+interface DatasetRef {
+  namespace: string;
+  name: string;
+}
+
+interface DatasetWithFacets extends DatasetRef {
+  facets?: {
+    columnLineage?: {
+      fields: Record<string, { inputFields: InputField[] }>;  // per-output-column lineage
+      dataset: InputField[];                                   // dataset-level dependencies
+    }
+  };
+}
+
+interface InputField {
+  namespace: string;
+  name: string;   // source dataset name (e.g. "schema.table")
+  field: string;  // source column name
+}
+```
+
+#### What goes into `fields` (per-column lineage)
+
+Each output column in the SELECT list maps to the **source input fields** it was computed from. The engine traces through:
+
+- Direct column references (`u.name` → `users.name`)
+- Expressions — all column references inside an expression are collected (e.g. `a.x + b.y` → both `a.x` and `b.y`)
+- CTE / subquery transparency — if a column passes through a CTE or derived table, it is traced back to the underlying physical table
+- `SELECT *` / `table.*` — expanded using metadata, each expanded column gets its own entry
+- Set operations (`UNION` / `INTERSECT` / `EXCEPT`) — output columns merge the inputs from both sides at the same ordinal position
+
+#### What goes into `dataset` (dataset-level dependencies)
+
+Column references in clauses that **filter, sort, or constrain the entire result set** but are not attributable to a single output column:
+
+- `WHERE` conditions
+- `JOIN ON` expressions
+- `JOIN USING` columns (attributed to all tables that own the column)
+- `GROUP BY` expressions
+- `HAVING` conditions
+- `ORDER BY` expressions
+- Window function definitions (`OVER (PARTITION BY … ORDER BY …)`)
+- Inherited dataset-level dependencies from CTEs / derived tables referenced in the FROM clause
+
+#### What goes into `inputs`
+
+Every distinct physical dataset (real table or unknown table) referenced anywhere in the query. CTEs and derived tables are **not** listed — they are transparent.
+
+Inputs are sorted by namespace, then by name.
+
+#### What is dropped / ignored
+
+| Scenario | Behavior |
+|----------|----------|
+| **Ambiguous bare column** (exists in multiple tables at same scope) | Dropped silently — `inputFields` will be empty for that column |
+| **CTE / derived table columns** | Transparent — traced through to the underlying physical table |
+| **Literal expressions** (e.g. `SELECT 1 AS one`) | No inputFields (empty array) — no source column to attribute |
+| **Function calls with no column args** (e.g. `NOW()`) | No inputFields |
+| **LIMIT / OFFSET / FETCH** | Not tracked (they don't reference columns) |
+| **Table aliases** | Used for resolution only — the physical table name appears in output |
+
+#### What happens when a table is NOT in metadata
+
+The table is still registered and appears in `inputs` with `kind: "unknown"`. Consequences:
+
+- `SELECT *` from it produces a single entry with `field: "*"` (cannot expand)
+- **Pragmatic attribution**: if there is exactly one completely-unknown table (no columns in metadata) in scope and a bare column cannot be resolved to any known table, it is attributed to that unknown table
+- Qualified references (`unknown_table.col`) produce an `InputField` with the referenced column name as-is
+
+#### Schema name handling
+
+Metadata entries with `tableSchema` are registered under **two lookup keys**:
+
+- Bare name: `"test"` → found
+- Schema-qualified: `"public.test"` → found
+
+Both `FROM test` and `FROM public.test` resolve to the same metadata entry. The output `name` in `InputField` will include the schema: `"public.test"`.
+
+When two tables share the same bare name from different schemas (e.g. `schema1.customers` and `schema2.customers`):
+- The bare name is **poisoned** — `SELECT customers.id` will not resolve
+- Fully-qualified references still work: `SELECT schema1.customers.id`
+- Aliases disambiguate: `FROM schema1.customers c1`
+
+#### Column name deduplication
+
+Output column names are deduplicated: if the SELECT list would produce two columns named `id`, the second becomes `id_1`, then `id_2`, etc. If no alias is given and no name can be inferred, synthetic names `_col0`, `_col1`, … are used.
+
+Input fields within each output column are deduplicated by `(namespace, name, field)` tuple.
+
+---
+
+### Differences between `getColumnLineage` and `getColumnLevelLineage`
+
+| Aspect | `getColumnLineage` | `getColumnLevelLineage` |
+|--------|-------------------|------------------------|
+| **Output shape** | Flat `{ tableColumns, unresolvedTableColumns }` | OpenLineage `{ inputs, outputs }` with facets |
+| **Granularity** | "Which columns of table X are used anywhere?" | "Output column Y was computed from input fields A, B, C" |
+| **Per-column attribution** | No — all columns are grouped by source table | Yes — each output column has its own `inputFields` list |
+| **Dataset-level tracking** | No distinction — all references go into the same bucket | Yes — WHERE/JOIN/GROUP BY go into a separate `dataset` array |
+| **Namespace support** | None | Full OpenLineage namespace model |
+| **Unknown tables** | Reported in `unresolvedTableColumns` | Still appear in `inputs` and `inputFields` |
+| **Unresolved columns** | Explicitly collected in `unresolvedTableColumns` | Silently dropped (empty `inputFields`) |
+| **CTE/derived handling** | Transparent (dropped from output) | Transparent (traced through to physical tables, dataset deps inherited) |
+| **Architecture** | ANTLR visitor pattern (`SqlBaseVisitor`) | Manual recursive tree walker (no visitor base class) |
+| **Subquery column origins** | Inferred for scope resolution but not tracked in output | Fully tracked — subquery/CTE column origins flow through to the outer query |
+
+In short: `getColumnLineage` answers **"which source columns does this query touch?"** while `getColumnLevelLineage` answers **"for each output column, where did its data come from, and what additional columns constrain the result?"**
+
+---
+
 ## Development
 
 The grammar files are in `grammar/` and the generated parser code in `src/generated/official/`.

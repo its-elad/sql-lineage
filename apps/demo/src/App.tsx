@@ -1,7 +1,9 @@
 import { useCallback, useState } from "react";
 import Editor, { type EditorProps } from "@monaco-editor/react";
-import { getColumnLineage, getUpstreamTables, type TableMetadata } from "@sql-lineage/core";
+import { getColumnLineage, getColumnLevelLineage, getUpstreamTables, type TableMetadata } from "@sql-lineage/core";
 import "./App.css";
+
+type AnalysisMode = "column-lineage" | "column-level-lineage" | "upstream-tables";
 
 const DEFAULT_SQL = `WITH order_summary AS (
   SELECT
@@ -57,11 +59,16 @@ const DEFAULT_NAMESPACE_METADATA: TableMetadata[] = [
   { tableName: "suppliers", columns: ["supplier_id", "supplier_name", "country", "status"] },
 ];
 
-function computeLineage(
-  ...params: Parameters<typeof getColumnLineage>
-): { columns: unknown; tables: unknown } | string {
+function computeLineage(mode: AnalysisMode, sql: string, metadata: TableMetadata[]): unknown {
   try {
-    return { tables: getUpstreamTables(params[0]), columns: getColumnLineage(...params) };
+    switch (mode) {
+      case "column-lineage":
+        return getColumnLineage(sql, metadata);
+      case "column-level-lineage":
+        return getColumnLevelLineage(sql, metadata, { defaultNamespace: "demo", outputName: "demo_output" });
+      case "upstream-tables":
+        return getUpstreamTables(sql);
+    }
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
@@ -77,18 +84,39 @@ const EDITOR_OPTIONS: EditorProps["options"] = {
 export default function App() {
   const [sql, setSql] = useState(DEFAULT_SQL);
   const [namespaceMetadata, setNamespaceMetadata] = useState(DEFAULT_NAMESPACE_METADATA);
+  const [mode, setMode] = useState<AnalysisMode>("column-lineage");
 
   const handleSqlChange = useCallback((value: string | undefined) => {
     setSql(value ?? "");
   }, []);
 
   // const rawParseTree = safeSerialize(sql);
-  const lineage = JSON.stringify(computeLineage(sql, namespaceMetadata), null, 2);
+  const lineage = JSON.stringify(computeLineage(mode, sql, namespaceMetadata), null, 2);
 
   return (
     <div className="app">
       <header className="app-header">
         <h1>SQL Lineage Explorer</h1>
+        <div className="mode-switcher">
+          <button
+            className={mode === "column-lineage" ? "mode-btn active" : "mode-btn"}
+            onClick={() => setMode("column-lineage")}
+          >
+            Column Lineage
+          </button>
+          <button
+            className={mode === "column-level-lineage" ? "mode-btn active" : "mode-btn"}
+            onClick={() => setMode("column-level-lineage")}
+          >
+            Column-Level Lineage
+          </button>
+          <button
+            className={mode === "upstream-tables" ? "mode-btn active" : "mode-btn"}
+            onClick={() => setMode("upstream-tables")}
+          >
+            Upstream Tables
+          </button>
+        </div>
       </header>
       <div className="panels">
         <section className="panel">

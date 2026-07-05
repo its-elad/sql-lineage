@@ -12,6 +12,9 @@
   background-color: #252526;
   border-bottom: 1px solid #3c3c3c;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .app-header h1 {
@@ -20,6 +23,33 @@
   font-weight: 600;
   color: #cccccc;
   letter-spacing: 0.02em;
+}
+
+.mode-switcher {
+  display: flex;
+  gap: 4px;
+}
+
+.mode-btn {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.75rem;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  background-color: #2d2d2d;
+  color: #999;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.mode-btn:hover {
+  background-color: #3c3c3c;
+  color: #ccc;
+}
+
+.mode-btn.active {
+  background-color: #0e639c;
+  border-color: #1177bb;
+  color: #fff;
 }
 
 .panels {
