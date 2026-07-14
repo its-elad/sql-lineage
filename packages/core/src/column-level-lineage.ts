@@ -32,6 +32,9 @@
  *  5. **Ambiguous bare-name poisoning** — Two unaliased tables that share a bare
  *     name (e.g. `schema1.users` and `schema2.users`) "poison" the short key
  *     so bare `users.col` references are flagged as ambiguous.
+ *  6. **Alias shadows CTE** — A FROM-clause alias that matches a CTE name will
+ *     shadow the CTE for column resolution within that query scope. This
+ *     matches SQL semantics where FROM aliases have priority over WITH names.
  */
 import { ParserRuleContext } from "antlr4ng";
 import {
@@ -775,7 +778,7 @@ export class ColumnLevelLineage {
   private appendBareColumnInputs(name: string, target: InputField[]): void {
     const normalized = normalizeId(name);
 
-    for (const [i, s] of [...this.queryScopeStack].reverse().entries()) {
+    for (const [i, s] of this.queryScopeStack.toReversed().entries()) {
       const isCurrent = i === 0; // i === 0 after reversal = the innermost scope
       const knownMatches: ScopeTable[] = [];
       const unknownMatches: ScopeTable[] = [];
@@ -1251,7 +1254,10 @@ export class ColumnLevelLineage {
 
     // Registration strategy for table lookup keys:
     // 1. If aliased: register under the alias only (SQL says alias hides the
-    //    original name within the same scope).
+    //    original name within the same scope). This means an alias that matches
+    //    a CTE name will shadow that CTE for column resolution in this scope —
+    //    this is correct per SQL semantics where FROM-clause aliases take
+    //    priority over WITH-clause names at the same query level.
     // 2. If unaliased: register under the bare (last segment) name, UNLESS a
     //    different table already occupies that key — in which case both are
     //    "poisoned" and the bare key is removed. This prevents ambiguous

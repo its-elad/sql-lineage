@@ -186,7 +186,7 @@ function fromColumnLevelLineage(result: ColumnLevelLineageResult): GraphData {
   const datasetNodeIds = new Map<string, string>();
   for (const input of result.inputs) {
     const key = `${input.namespace}\0${input.name}`;
-    const nodeId = `input_${input.namespace}_${input.name}`;
+    const nodeId = `input::${input.namespace}::${input.name}`;
     datasetNodeIds.set(key, nodeId);
 
     const fields = inputFieldsByDataset.get(key);
@@ -303,12 +303,16 @@ function fromUpstreamTables(tables: string[]): GraphData {
 // Public API
 // ────────────────────────────────────────────────────────────────
 
-/**
- * Converts any lineage result to React Flow graph data based on the analysis mode.
- */
-export function buildGraphData(mode: LineageMode, result: unknown): GraphData | null {
-  if (!result || typeof result === "string") return null;
+type LineageModeResultMap = {
+  "column-lineage": ColumnLineageResult;
+  "column-level-lineage": ColumnLevelLineageResult;
+  "upstream-tables": string[];
+};
 
+/**
+ * Converts a lineage result to React Flow graph data based on the analysis mode.
+ */
+export function buildGraphData<M extends LineageMode>(mode: M, result: LineageModeResultMap[M]): GraphData | null {
   try {
     switch (mode) {
       case "column-lineage":
@@ -317,6 +321,8 @@ export function buildGraphData(mode: LineageMode, result: unknown): GraphData | 
         return fromColumnLevelLineage(result as ColumnLevelLineageResult);
       case "upstream-tables":
         return fromUpstreamTables(result as string[]);
+      default:
+        return null;
     }
   } catch {
     return null;

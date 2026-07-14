@@ -2308,3 +2308,23 @@ describe("Additional Edge Cases", () => {
     });
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API BOUNDARY CASES
+// ─────────────────────────────────────────────────────────────────────────────
+describe("API boundary cases", () => {
+  test("empty SQL string — throws", () => {
+    expect(() => run("")).toThrow();
+  });
+
+  test("SELECT with no FROM clause — literal columns, no inputs", () => {
+    const r = run("SELECT 1 AS one, 'hello' AS greeting");
+    expect(r.inputs).toEqual([]);
+    expect(fields(r)).toEqual({ one: [], greeting: [] });
+    expect(dataset(r)).toEqual([]);
+  });
+
+  test("syntax-error SQL — throws", () => {
+    expect(() => run("SELECT FROM WHERE")).toThrow();
+  });
+});

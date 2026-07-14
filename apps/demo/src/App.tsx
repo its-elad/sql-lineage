@@ -1,5 +1,5 @@
-import { useCallback, useState } from "react";
-import Editor, { type EditorProps } from "@monaco-editor/react";
+import { useCallback, useRef, useState } from "react";
+import Editor, { type EditorProps, type Monaco } from "@monaco-editor/react";
 import { getColumnLineage, getColumnLevelLineage, getUpstreamTables, type TableMetadata } from "@sql-lineage/core";
 import { LineageGraphModal } from "./lineage-graph";
 import "./lineage-graph/lineage-graph.css";
@@ -76,6 +76,27 @@ function computeLineage(mode: AnalysisMode, sql: string, metadata: TableMetadata
   }
 }
 
+const METADATA_SCHEMA_URI = "schema://sql-lineage/table-metadata.json";
+
+const TABLE_METADATA_SCHEMA = {
+  $id: METADATA_SCHEMA_URI,
+  type: "array",
+  items: {
+    type: "object",
+    required: ["tableName", "columns"],
+    additionalProperties: false,
+    properties: {
+      tableName: { type: "string", description: "Name of the table" },
+      tableSchema: { type: "string", description: "Optional schema qualifier (e.g. 'public')" },
+      columns: {
+        type: "array",
+        items: { type: "string" },
+        description: "List of column names in the table",
+      },
+    },
+  },
+};
+
 const EDITOR_OPTIONS: EditorProps["options"] = {
   minimap: { enabled: false },
   scrollBeyondLastLine: false,
@@ -86,11 +107,28 @@ const EDITOR_OPTIONS: EditorProps["options"] = {
 export default function App() {
   const [sql, setSql] = useState(DEFAULT_SQL);
   const [namespaceMetadata, setNamespaceMetadata] = useState(DEFAULT_NAMESPACE_METADATA);
+  const [metadataText, setMetadataText] = useState(() => JSON.stringify(DEFAULT_NAMESPACE_METADATA, null, 2));
   const [mode, setMode] = useState<AnalysisMode>("column-lineage");
   const [graphOpen, setGraphOpen] = useState(false);
+  const schemaRegistered = useRef(false);
 
   const handleSqlChange = useCallback((value: string | undefined) => {
     setSql(value ?? "");
+  }, []);
+
+  const handleMetadataEditorBeforeMount = useCallback((monaco: Monaco) => {
+    if (schemaRegistered.current) return;
+    schemaRegistered.current = true;
+    monaco.languages.json.jsonDefaults.setDiagnosticsOptions({
+      validate: true,
+      schemas: [
+        {
+          uri: METADATA_SCHEMA_URI,
+          fileMatch: ["metadata.json"],
+          schema: TABLE_METADATA_SCHEMA,
+        },
+      ],
+    });
   }, []);
 
   // const rawParseTree = safeSerialize(sql);
@@ -143,10 +181,14 @@ export default function App() {
             <Editor
               height="100%"
               defaultLanguage="json"
-              value={JSON.stringify(namespaceMetadata, null, 2)}
+              path="metadata.json"
+              value={metadataText}
+              beforeMount={handleMetadataEditorBeforeMount}
               onChange={(value) => {
+                const text = value ?? "";
+                setMetadataText(text);
                 try {
-                  setNamespaceMetadata(JSON.parse(value ?? ""));
+                  setNamespaceMetadata(JSON.parse(text));
                 } catch {}
               }}
               theme="vs-dark"
