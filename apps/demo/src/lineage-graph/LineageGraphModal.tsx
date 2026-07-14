@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef } from "react";
 import { LineageGraph } from "./LineageGraph";
-import type { LineageMode } from "./lineage-graph-utils";
+import type { LineageMode, LineageModeResult } from "./lineage-graph-utils";
 
 interface LineageGraphModalProps {
   isOpen: boolean;
   onClose: () => void;
   mode: LineageMode;
-  result: unknown;
+  result: LineageModeResult | string;
 }
 
 /**

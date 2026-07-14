@@ -13,7 +13,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import { TableNode } from "./TableNode";
-import { buildGraphData, type LineageMode, type TableNodeData } from "./lineage-graph-utils";
+import { buildGraphData, type LineageMode, type LineageModeResult, type TableNodeData } from "./lineage-graph-utils";
 
 const nodeTypes: NodeTypes = {
   tableNode: TableNode,
@@ -21,7 +21,7 @@ const nodeTypes: NodeTypes = {
 
 interface LineageGraphProps {
   mode: LineageMode;
-  result: unknown;
+  result: LineageModeResult | string;
 }
 
 /**
@@ -30,7 +30,10 @@ interface LineageGraphProps {
  * Nodes are fully draggable via React Flow's controlled state.
  */
 export function LineageGraph({ mode, result }: LineageGraphProps) {
-  const graphData = useMemo(() => buildGraphData(mode, result), [mode, result]);
+  const graphData = useMemo(
+    () => (typeof result === "string" ? null : buildGraphData(mode, result)),
+    [mode, result]
+  );
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<TableNodeData>>([]);
   const [edges, setEdges] = useEdgesState<Edge>([]);

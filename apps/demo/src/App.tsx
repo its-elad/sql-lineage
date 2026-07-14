@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import Editor, { type EditorProps, type Monaco } from "@monaco-editor/react";
 import { getColumnLineage, getColumnLevelLineage, getUpstreamTables, type TableMetadata } from "@sql-lineage/core";
 import { LineageGraphModal } from "./lineage-graph";
+import type { LineageModeResult } from "./lineage-graph";
 import "./lineage-graph/lineage-graph.css";
 import "./App.css";
 
@@ -61,7 +62,7 @@ const DEFAULT_NAMESPACE_METADATA: TableMetadata[] = [
   { tableName: "suppliers", columns: ["supplier_id", "supplier_name", "country", "status"] },
 ];
 
-function computeLineage(mode: AnalysisMode, sql: string, metadata: TableMetadata[]): unknown {
+function computeLineage(mode: AnalysisMode, sql: string, metadata: TableMetadata[]): LineageModeResult | string {
   try {
     switch (mode) {
       case "column-lineage":

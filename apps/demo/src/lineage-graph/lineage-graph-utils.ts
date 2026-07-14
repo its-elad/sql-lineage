@@ -303,16 +303,12 @@ function fromUpstreamTables(tables: string[]): GraphData {
 // Public API
 // ────────────────────────────────────────────────────────────────
 
-type LineageModeResultMap = {
-  "column-lineage": ColumnLineageResult;
-  "column-level-lineage": ColumnLevelLineageResult;
-  "upstream-tables": string[];
-};
+export type LineageModeResult = ColumnLineageResult | ColumnLevelLineageResult | string[];
 
 /**
  * Converts a lineage result to React Flow graph data based on the analysis mode.
  */
-export function buildGraphData<M extends LineageMode>(mode: M, result: LineageModeResultMap[M]): GraphData | null {
+export function buildGraphData(mode: LineageMode, result: LineageModeResult): GraphData | null {
   try {
     switch (mode) {
       case "column-lineage":
