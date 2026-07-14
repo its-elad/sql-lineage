@@ -48,28 +48,16 @@ import {
   uuid,
 } from "./utils.js";
 import { HashSet } from "./hashset.js";
+import { UnresolvedColumnReference, TableMetadata } from "./types.js";
 
 // ════════════════════════════════════════════════════════════════
 // Public Types
 // ════════════════════════════════════════════════════════════════
 
-/** Metadata describing a table available in the query namespace. */
-export interface TableMetadata {
-  tableName: string;
-  tableSchema?: string;
-  columns: string[];
-}
-
 /** Resolved column lineage entry for a single source table. */
 export interface TableColumnLineage {
   table: string;
   columns: string[];
-}
-
-/** Column reference that could not be resolved to a known table. */
-export interface UnresolvedColumnReference {
-  table?: string;
-  column: string;
 }
 
 /** Full result returned by {@link getColumnLineage}. */
