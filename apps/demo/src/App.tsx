@@ -1,6 +1,8 @@
 import { useCallback, useState } from "react";
 import Editor, { type EditorProps } from "@monaco-editor/react";
 import { getColumnLineage, getColumnLevelLineage, getUpstreamTables, type TableMetadata } from "@sql-lineage/core";
+import { LineageGraphModal } from "./lineage-graph";
+import "./lineage-graph/lineage-graph.css";
 import "./App.css";
 
 type AnalysisMode = "column-lineage" | "column-level-lineage" | "upstream-tables";
@@ -85,13 +87,15 @@ export default function App() {
   const [sql, setSql] = useState(DEFAULT_SQL);
   const [namespaceMetadata, setNamespaceMetadata] = useState(DEFAULT_NAMESPACE_METADATA);
   const [mode, setMode] = useState<AnalysisMode>("column-lineage");
+  const [graphOpen, setGraphOpen] = useState(false);
 
   const handleSqlChange = useCallback((value: string | undefined) => {
     setSql(value ?? "");
   }, []);
 
   // const rawParseTree = safeSerialize(sql);
-  const lineage = JSON.stringify(computeLineage(mode, sql, namespaceMetadata), null, 2);
+  const lineageResult = computeLineage(mode, sql, namespaceMetadata);
+  const lineage = JSON.stringify(lineageResult, null, 2);
 
   return (
     <div className="app">
@@ -164,6 +168,22 @@ export default function App() {
           </div>
         </section>
       </div>
+
+      <button
+        className="lineage-fab"
+        onClick={() => setGraphOpen(true)}
+        title="Visualize lineage graph"
+        aria-label="Open lineage graph"
+      >
+        ⬡
+      </button>
+
+      <LineageGraphModal
+        isOpen={graphOpen}
+        onClose={() => setGraphOpen(false)}
+        mode={mode}
+        result={lineageResult}
+      />
     </div>
   );
 }

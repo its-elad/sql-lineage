@@ -1,3 +1,38 @@
+/**
+ * @module column-level-lineage
+ *
+ * Implements OpenLineage-shaped column-level lineage extraction from Trino SQL.
+ *
+ * Design overview:
+ * ─────────────────
+ * The algorithm performs a single top-down walk of the ANTLR parse tree,
+ * maintaining two stacks:
+ *  • `queryScopeStack` — tracks FROM-clause tables visible at each nesting level.
+ *    Supports correlated subqueries by searching outward from the innermost scope.
+ *  • `cteScopeStack` — tracks CTEs defined in WITH clauses, searched innermost-first.
+ *
+ * Key design decisions:
+ *  1. **Index-based column loops** — Column origins are matched by *position* rather
+ *     than by name because SQL aliases, CTE column lists, and column aliases on
+ *     subqueries redefine names at the boundary. Position is the only stable
+ *     identifier that maps output columns of a CTE/subquery to the inner SELECT
+ *     list items that produced them.
+ *  2. **Scope push before FROM registration** — The scope is pushed *before*
+ *     iterating FROM relations so that LATERAL subqueries and UNNEST expressions
+ *     can resolve correlated references to tables already registered in the same
+ *     FROM clause (left-to-right SQL semantics).
+ *  3. **Transparent derived sources** — CTE and derived tables are resolved
+ *     *through* to their underlying real-table column origins, so lineage output
+ *     only ever contains physical datasets. This avoids leaking internal synthetic
+ *     names into the OpenLineage output.
+ *  4. **Pragmatic unknown-table attribution** — When a bare column cannot be found
+ *     in any confirmed table but exactly one fully-unknown (metadata-less) table
+ *     exists in scope, the column is pragmatically attributed to it rather than
+ *     being dropped as unresolved.
+ *  5. **Ambiguous bare-name poisoning** — Two unaliased tables that share a bare
+ *     name (e.g. `schema1.users` and `schema2.users`) "poison" the short key
+ *     so bare `users.col` references are flagged as ambiguous.
+ */
 import { ParserRuleContext } from "antlr4ng";
 import {
   QueryContext,
@@ -44,7 +79,9 @@ import {
   NormalizedIdBrand,
   uuid,
 } from "./utils.js";
-import { TableMetadata, ScopeTableKind, buildMetadataLookup } from "./lineage-shared.js";
+import { ScopeTableKind, buildMetadataLookup } from "./lineage-shared.js";
+import { HashSet } from "./hashset.js";
+import { UnresolvedColumnReference, TableMetadata } from "./types.js";
 
 // ════════════════════════════════════════════════════════════════
 // Public Types
@@ -126,6 +163,17 @@ export interface ColumnLevelLineageResult {
   inputs: DatasetRef[];
   /** Always a single entry — the (possibly synthetic) output dataset. */
   outputs: DatasetWithFacets[];
+  /**
+   * Column references that could not be fully resolved to a known table/column.
+   * Each entry carries an optional `table` field:
+   *  - `table` is set when a table reference was identified but the column name
+   *    is not present in that table's known schema (metadata may be incomplete),
+   *    or the table itself is absent from the provided metadata (unknown table).
+   *  - `table` is absent when the reference had no table context at all
+   *    (bare unresolved column, ambiguous column, or a star expansion on an
+   *    unknown prefix).
+   */
+  unresolvedTableColumns: UnresolvedColumnReference[];
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -200,10 +248,16 @@ interface QueryAnalysis {
 // Internal helpers
 // ════════════════════════════════════════════════════════════════
 
+/** Produces a stable identity key for an InputField (namespace:dataset:column). */
 function inputFieldKey(f: InputField): string {
-  return `${f.namespace}\u0000${f.name}\u0000${f.field}`;
+  return `${f.namespace}:${f.name}:${f.field}`;
 }
 
+/**
+ * Removes duplicate InputField entries while preserving insertion order.
+ * Duplicates arise naturally when the same column is referenced multiple
+ * times in an expression (e.g. `COALESCE(a.id, a.id)`).
+ */
 function dedupeInputFields(fields: InputField[]): InputField[] {
   const seen = new Set<string>();
   const out: InputField[] = [];
@@ -268,10 +322,16 @@ export class ColumnLevelLineage {
   private readonly outputNamespace: string;
   private readonly outputName: string;
 
+  /** Stack of FROM-clause scopes; innermost (current query) is last. */
   private readonly queryScopeStack: QueryScope[] = [];
+  /** Stack of WITH-clause CTE scopes; innermost is last. */
   private readonly cteScopeStack: CteScope[] = [];
-  /** Distinct upstream datasets referenced anywhere in the query. */
+  /** Distinct upstream datasets referenced anywhere in the query (deduped by namespace\0name). */
   private readonly inputDatasets = new Map<string, DatasetRef>();
+  /** Column references that could not be resolved (deduped by table:column). */
+  private readonly unresolvedColumns = new HashSet<UnresolvedColumnReference>(
+    ({ table, column }) => `${table ?? ""}:${normalizeId(column)}`
+  );
 
   private readonly result: ColumnLevelLineageResult;
 
@@ -283,9 +343,7 @@ export class ColumnLevelLineage {
 
     const tree = parseSqlAntlr(sql);
     const queryCtx = findRootQuery(tree);
-    const analysis: QueryAnalysis = queryCtx
-      ? this.analyzeQuery(queryCtx)
-      : { outputColumns: [], datasetInputs: [] };
+    const analysis: QueryAnalysis = queryCtx ? this.analyzeQuery(queryCtx) : { outputColumns: [], datasetInputs: [] };
 
     this.result = this.buildResult(analysis);
   }
@@ -299,10 +357,19 @@ export class ColumnLevelLineage {
   // Result assembly
   // ════════════════════════════════════════════════════════════
 
+  /**
+   * Assembles the final {@link ColumnLevelLineageResult} from the raw analysis.
+   *
+   * Output column names are de-duplicated with numeric suffixes (`_1`, `_2`, …)
+   * to match Trino’s behaviour when multiple output columns share the same
+   * inferred name (e.g. bare `SELECT a.id, b.id FROM …`).
+   */
   private buildResult(analysis: QueryAnalysis): ColumnLevelLineageResult {
     const fields: Record<string, ColumnLineageField> = {};
+    // Track used output names to append numeric suffixes on collision.
     const usedNames = new Set<string>();
     for (const [i, col] of analysis.outputColumns.entries()) {
+      // Anonymous columns (no alias, no inferable name) get a positional name.
       const baseName = col.name && col.name.length > 0 ? col.name : `_col${i}`;
       let name = baseName;
       let suffix = 1;
@@ -326,7 +393,13 @@ export class ColumnLevelLineage {
       return ns !== 0 ? ns : a.name.localeCompare(b.name);
     });
 
-    return { inputs, outputs: [output] };
+    const unresolvedColumns = [...this.unresolvedColumns.values()].sort((a, b) => {
+      const tableCompare = (a.table ?? "").localeCompare(b.table ?? "");
+      if (tableCompare !== 0) return tableCompare;
+      return a.column.localeCompare(b.column);
+    });
+
+    return { inputs, outputs: [output], unresolvedTableColumns: unresolvedColumns };
   }
 
   // ════════════════════════════════════════════════════════════
@@ -341,6 +414,10 @@ export class ColumnLevelLineage {
    * Pushes `scope` onto the query scope stack and returns a `Disposable` that
    * pops it. Pair with `using` so the scope is always popped when the
    * enclosing block exits — even on throw.
+   *
+   * Using the TC39 Explicit Resource Management (`using`) pattern guarantees
+   * that scopes are correctly balanced even if an unexpected error occurs
+   * mid-analysis, preventing stale scopes from corrupting subsequent resolution.
    */
   private pushQueryScope(scope: QueryScope): Disposable {
     this.queryScopeStack.push(scope);
@@ -375,6 +452,11 @@ export class ColumnLevelLineage {
    * Registers all CTEs in a WITH clause into `cteScope`. Each CTE body is
    * fully analysed so column origins can flow through transparently.
    * CTEs are registered in order so that chained CTEs can reference earlier ones.
+   *
+   * NOTE: We use index-based iteration over columns (line `for (let i = 0; ...)`)
+   * because CTE column aliases override the inner query’s output names *by
+   * position*, not by original name. The i-th alias maps to the i-th output
+   * column of the CTE body regardless of what name that column was assigned.
    */
   private registerCtes(withCtx: WithContext, cteScope: CteScope): void {
     for (const namedQuery of withCtx.namedQuery()) {
@@ -415,10 +497,16 @@ export class ColumnLevelLineage {
    */
   private analyzeQueryTerm(term: QueryTermContext, queryNoWithCtx?: QueryNoWithContext): QueryAnalysis {
     if (term instanceof SetOperationContext) {
+      // UNION / INTERSECT / EXCEPT: analyse left and right branches
+      // independently and merge by position.
       const left = term._left ? this.analyzeQueryTerm(term._left) : { outputColumns: [], datasetInputs: [] };
       const right = term._right ? this.analyzeQueryTerm(term._right) : { outputColumns: [], datasetInputs: [] };
+      // Use the wider branch’s width; narrower branch fills with empty inputs.
       const width = Math.max(left.outputColumns.length, right.outputColumns.length);
       const outputColumns: OutputColumn[] = [];
+      // Index-based merge: the i-th output column inherits inputs from BOTH
+      // the i-th left and i-th right column. This is correct because SQL set
+      // operations combine columns positionally, not by name.
       for (let i = 0; i < width; i++) {
         const l = left.outputColumns[i];
         const r = right.outputColumns[i];
@@ -428,7 +516,9 @@ export class ColumnLevelLineage {
         });
       }
       const datasetInputs = [...left.datasetInputs, ...right.datasetInputs];
-      // Set-op ORDER BY has no single FROM scope — unresolved refs are dropped.
+      // Set-op ORDER BY cannot be resolved through a FROM scope (there is none
+      // at this level — each branch has its own). Column references in ORDER BY
+      // here would be positional ordinals or aliases, not FROM-scoped.
       if (queryNoWithCtx) {
         const ob = queryNoWithCtx.orderBy();
         if (ob) datasetInputs.push(...this.collectInputFields(ob));
@@ -478,12 +568,18 @@ export class ColumnLevelLineage {
     };
     // Push scope BEFORE registering FROM relations so that LATERAL / UNNEST
     // correlated references (e.g. UNNEST(u.tags)) can resolve tables already
-    // registered earlier in the same FROM clause.
+    // registered earlier in the same FROM clause. This mirrors SQL’s
+    // left-to-right evaluation order within a FROM clause.
     using _scope = this.pushQueryScope(scope);
+    // Register each relation sequentially (left-to-right). Earlier tables are
+    // already in scope when later LATERAL / UNNEST items are processed.
     for (const rel of spec.relation()) {
       this.registerRelation(rel, scope);
     }
 
+    // Dataset-level inputs: these are column references in clauses that affect
+    // the output dataset as a whole (filtering, grouping, ordering) rather
+    // than being attributable to a single output column.
     const datasetInputs: InputField[] = [...scope.inheritedDatasetInputs];
 
     // JOIN ON / USING — collect from each join in the FROM tree.
@@ -512,13 +608,23 @@ export class ColumnLevelLineage {
     return { outputColumns, datasetInputs };
   }
 
-  /** Processes a single SELECT list item into output columns. */
+  /**
+   * Processes a single SELECT list item into output columns.
+   *
+   * For `SelectSingle` items: resolves all column references in the expression
+   * and produces one output column (name from alias or inferred from expression).
+   *
+   * For `SelectAll` (`*` / `t.*`): expands to one output column per source
+   * table column. Tables are expanded in Map insertion order (which reflects
+   * registration order from the FROM clause), matching the SQL engine’s
+   * output column ordering guarantee.
+   */
   private appendSelectItem(item: ParserRuleContext, scope: QueryScope, outputColumns: OutputColumn[]): void {
     if (item instanceof SelectSingleContext) {
       const aliasCtx = item.identifier();
       const expr = item.expression();
       const inputFields = this.collectInputFields(expr);
-      const name = aliasCtx ? getIdentifierText(aliasCtx) : extractColumnName(expr) ?? expr.getText();
+      const name = aliasCtx ? getIdentifierText(aliasCtx) : (extractColumnName(expr) ?? expr.getText());
       outputColumns.push({ name, inputFields });
       return;
     }
@@ -554,7 +660,16 @@ export class ColumnLevelLineage {
     }
   }
 
-  /** Expands a single table's columns for star expansion. */
+  /**
+   * Expands a single table’s columns for star expansion (`*` / `table.*`).
+   *
+   * For tables with no known columns (unknown/metadata-less), emits a synthetic
+   * `*` InputField so the dependency is still tracked even without schema info.
+   *
+   * Column order follows the table’s `columns` array, which preserves the
+   * original DDL declaration order (for real tables) or the SELECT list order
+   * (for derived tables / CTEs).
+   */
   private expandTableStar(table: ScopeTable, outputColumns: OutputColumn[]): void {
     if (table.columns.length === 0) {
       if (table.kind === "real" || table.kind === "unknown") {
@@ -588,6 +703,16 @@ export class ColumnLevelLineage {
    * inside `node` and resolves it through the current scope stack. Subqueries
    * are analysed once and contribute both their output column inputs and
    * dataset deps to the enclosing context.
+   *
+   * Traversal stops at:
+   *  - `ColumnReferenceContext`: bare column name → resolved via scope.
+   *  - `DereferenceContext`: qualified column (e.g. `t.col`) → flattened and resolved.
+   *  - `QueryContext`: inner subquery → analysed recursively; its results merge here.
+   *  - `GroupingOperationContext`: `GROUPING(col, …)` → each argument resolved.
+   *
+   * All other nodes are traversed recursively to reach these leaf types.
+   * This avoids needing a visitor for every expression production; the
+   * `children` iteration handles the generic case.
    */
   private collectInputFieldsInto(node: ParserRuleContext, target: InputField[]): void {
     if (node instanceof ColumnReferenceContext) {
@@ -637,14 +762,25 @@ export class ColumnLevelLineage {
    *    (no metadata columns at all) is in scope → pragmatically attribute.
    * 4. Outer-scope derived tables are excluded from resolution to prevent
    *    incorrect correlated attribution.
+   *
+   * The reversed iteration (`[...stack].reverse()`) ensures innermost-first
+   * search which is safe because:
+   *  - SQL name resolution always prefers the closest (most local) scope.
+   *  - Correlated references only resolve outward when the inner scope has no
+   *    match, exactly matching this fallback behaviour.
+   *  - De-duplication by `qualifiedName` (not object identity) ensures that
+   *    self-joins (same table aliased differently) count as one table for
+   *    ambiguity purposes, preventing false positives.
    */
   private appendBareColumnInputs(name: string, target: InputField[]): void {
     const normalized = normalizeId(name);
 
     for (const [i, s] of [...this.queryScopeStack].reverse().entries()) {
-      const isCurrent = i === 0;
+      const isCurrent = i === 0; // i === 0 after reversal = the innermost scope
       const knownMatches: ScopeTable[] = [];
       const unknownMatches: ScopeTable[] = [];
+      // De-duplicate by qualified name so self-joins (same physical table,
+      // different aliases) only count once and don’t trigger false ambiguity.
       const seen = new Set<NormalizedIdBrand>();
 
       for (const t of s.tables.values()) {
@@ -661,6 +797,8 @@ export class ColumnLevelLineage {
       }
 
       // Prefer confirmed matches over pragmatic unknown-table matches.
+      // This two-tier system avoids attributing a column to an unknown table
+      // when a confirmed table already claims it.
       const matches = knownMatches.length > 0 ? knownMatches : unknownMatches;
       if (matches.length === 0) continue;
 
@@ -675,22 +813,29 @@ export class ColumnLevelLineage {
         }
         return;
       }
-      // Ambiguous — multiple distinct tables own this column; drop.
+      // Ambiguous — multiple distinct tables own this column.
+      this.recordUnresolved(undefined, name);
       return;
     }
+    // Not found in any scope.
+    this.recordUnresolved(undefined, name);
   }
 
   /**
    * Resolves a qualified column reference such as `t.col` or
    * `schema.table.col`.
    *
-   * Resolution order:
-   *  1. Try the dotted prefix as a table reference.
-   *  2. Progressively shorter right-hand suffixes
-   *     (catalog.schema.table → schema.table → table).
-   *  3. Struct field access — when the prefix is a table and the next segment
-   *     is a confirmed column, attribute to that column (ignoring deeper
-   *     sub-fields like `.field.subfield`).
+   * Resolution order (first match wins):
+   *  1. Try the full dotted prefix as a table reference (e.g. `schema.table`).
+   *  2. Progressively shorter right-hand suffixes of the prefix
+   *     (catalog.schema.table → schema.table → table). This handles
+   *     over-qualified references where the user includes the catalog/schema
+   *     but the table is registered under a shorter key.
+   *  3. Struct field access — when a left prefix resolves to a table and the
+   *     next segment is a confirmed column, attribute to that column (ignoring
+   *     deeper sub-fields like `.field.subfield`). This is correct for SQL
+   *     column-level lineage: `t.profile.age` depends on column `profile`
+   *     regardless of which nested field is accessed.
    *  4. Fallback: treat the first segment as a bare column name with struct
    *     field access (e.g. `column.field`) — resolve just the base name.
    */
@@ -749,6 +894,11 @@ export class ColumnLevelLineage {
     this.appendBareColumnInputs(parts[0]!, target);
   }
 
+  /** Records a column reference as unresolved (deduped by table+column). */
+  private recordUnresolved(table: string | undefined, column: string): void {
+    this.unresolvedColumns.add(table ? { table, column } : { column });
+  }
+
   /**
    * Appends the input fields for `colName` on the given `table`.
    *
@@ -766,12 +916,18 @@ export class ColumnLevelLineage {
     }
     if (table.kind === "real" || table.kind === "unknown") {
       target.push({ namespace: this.defaultNamespace, name: table.qualifiedName, field: colName });
+      this.recordUnresolved(table.qualifiedName, colName);
     }
   }
 
   /**
    * Looks up a table by alias or name, searching from the innermost scope
    * outward (supporting correlated subqueries).
+   *
+   * The reverse traversal order is safe and correct because SQL name resolution
+   * always binds to the nearest (most local) definition. A table alias `t` in
+   * an inner subquery shadows any outer `t` — searching innermost-first means
+   * we find the local binding without ever seeing the outer one.
    */
   private resolveTableFromScope(nameOrAlias: string): ScopeTable | undefined {
     const id = normalizeId(nameOrAlias);
@@ -896,6 +1052,10 @@ export class ColumnLevelLineage {
       const aliasOrName = alias ?? this.getUniqueDerivedTableName();
       const columns = columnAliases ?? inner.outputColumns.map((c, i) => c.name || `_col${i}`);
       const origins = new Map<NormalizedIdBrand, InputField[]>();
+      // Index-based: the i-th column alias/name on the derived table maps to
+      // the i-th output column of the subquery body. This positional mapping
+      // is the only safe approach because column aliases can freely rename the
+      // inner columns (e.g. `(SELECT a AS x, b AS y) AS sub(p, q)`).
       for (let i = 0; i < columns.length; i++) {
         const key = normalizeId(columns[i]!);
         if (!origins.has(key)) origins.set(key, inner.outputColumns[i]?.inputFields ?? []);
@@ -934,9 +1094,7 @@ export class ColumnLevelLineage {
           .jsonTableColumn()
           .filter(
             (c): c is OrdinalityColumnContext | ValueColumnContext | QueryColumnContext =>
-              c instanceof OrdinalityColumnContext ||
-              c instanceof ValueColumnContext ||
-              c instanceof QueryColumnContext
+              c instanceof OrdinalityColumnContext || c instanceof ValueColumnContext || c instanceof QueryColumnContext
           )
           .map((c) => getIdentifierText(c.identifier()));
       }
@@ -1010,8 +1168,19 @@ export class ColumnLevelLineage {
   /**
    * Registers a real / cte / unknown {@link TableNameContext} in the FROM scope,
    * applying alias / unaliased / qualified-name registration rules and the
-   * "ambiguous bare-name" poisoning logic so that two same-bare-name unaliased
+   * “ambiguous bare-name” poisoning logic so that two same-bare-name unaliased
    * tables from different schemas do not resolve via the bare identifier.
+   *
+   * **Why index-based loops for column origins:**
+   * Column aliases on a table (e.g. `FROM users AS u(a, b, c)`) rename the
+   * output columns *by position*. The i-th alias corresponds to the i-th
+   * column in the table’s schema. Index-based iteration is the only correct
+   * way to establish this positional mapping — name-based matching would
+   * silently break when an alias differs from the underlying column name.
+   *
+   * The same reasoning applies to CTE column aliases:
+   * `WITH cte(x, y) AS (SELECT a, b FROM t)` — `x` maps to the 1st output
+   * column `a`, `y` maps to the 2nd output column `b`.
    */
   private registerTableName(
     primary: TableNameContext,
@@ -1029,6 +1198,11 @@ export class ColumnLevelLineage {
     if (cte) {
       const columns = columnAliases ?? cte.columns;
       const origins = new Map<NormalizedIdBrand, InputField[]>();
+      // Index-based: positional mapping from the outer alias (or CTE column
+      // name) back to the inner CTE body’s output columns. The i-th column
+      // in the CTE reference maps to the i-th column produced by the CTE body.
+      // `!origins.has(key)` guard: first occurrence wins when duplicate column
+      // names exist (shouldn’t happen in valid SQL but defends against it).
       for (let i = 0; i < columns.length; i++) {
         const key = normalizeId(columns[i]!);
         const sourceCol = cte.columns[i];
@@ -1059,12 +1233,14 @@ export class ColumnLevelLineage {
       const sourceCols = meta?.columns ?? [];
       const columns = columnAliases ?? sourceCols;
       const origins = new Map<NormalizedIdBrand, InputField[]>();
-      // For real/unknown: each column maps to itself in the source dataset.
-      // If the user supplied column aliases, we still attribute back to the
-      // underlying real column at the same position (when known).
+      // Index-based: for real/unknown tables, each column maps to itself in
+      // the source dataset. When the user supplied column aliases (e.g.
+      // `FROM users AS u(a, b)`), we still attribute back to the underlying
+      // real column at the same position. This is safe because SQL column
+      // aliases on base tables are strictly positional.
       for (let i = 0; i < columns.length; i++) {
         const aliasName = columns[i]!;
-        const sourceCol = columnAliases ? sourceCols[i] ?? aliasName : aliasName;
+        const sourceCol = columnAliases ? (sourceCols[i] ?? aliasName) : aliasName;
         const key = normalizeId(aliasName);
         if (!origins.has(key)) {
           origins.set(key, [{ ...datasetRef, field: sourceCol }]);
@@ -1073,7 +1249,15 @@ export class ColumnLevelLineage {
       scopeTable = { qualifiedName, columns, columnOrigins: origins, kind };
     }
 
-    // Register under alias (or bare table name when no alias).
+    // Registration strategy for table lookup keys:
+    // 1. If aliased: register under the alias only (SQL says alias hides the
+    //    original name within the same scope).
+    // 2. If unaliased: register under the bare (last segment) name, UNLESS a
+    //    different table already occupies that key — in which case both are
+    //    "poisoned" and the bare key is removed. This prevents ambiguous
+    //    resolution of `tbl.col` when two schemas define the same table name.
+    // 3. Always register under the full qualified normalised name so that
+    //    fully-qualified references (e.g. `schema.table.col`) still resolve.
     const bareName = nameParts.at(-1);
     const normalizedAlias = alias ? normalizeId(alias) : null;
     const normalizedBare = bareName ? normalizeId(bareName) : null;
@@ -1081,8 +1265,13 @@ export class ColumnLevelLineage {
     if (normalizedAlias) {
       scope.tables.set(normalizedAlias, scopeTable);
     } else if (normalizedBare) {
+      // Ambiguous bare-name poisoning: once poisoned, the key is never
+      // un-poisoned (correct for SQL semantics within a single FROM clause).
       if (!scope.ambiguousKeys.has(normalizedBare)) {
         const existing = scope.tables.get(normalizedBare);
+        // Compare qualified names to distinguish true ambiguity from self-join.
+        // Self-join (same table twice): same qualifiedName → no poisoning.
+        // Different tables: different qualifiedName → poison the bare key.
         if (existing && normalizeId(existing.qualifiedName) !== normalizeId(scopeTable.qualifiedName)) {
           scope.tables.delete(normalizedBare);
           scope.ambiguousKeys.add(normalizedBare);
@@ -1091,7 +1280,8 @@ export class ColumnLevelLineage {
         }
       }
     }
-    // Always make the full qualified normalised name resolvable.
+    // Always make the full qualified normalised name resolvable so that
+    // `schema.table.col` references work regardless of aliasing.
     if (!scope.tables.has(normalizedName)) {
       scope.tables.set(normalizedName, scopeTable);
     }
@@ -1100,6 +1290,11 @@ export class ColumnLevelLineage {
   /**
    * Registers a derived source (subquery, LATERAL, UNNEST, TABLE(), JSON_TABLE,
    * MATCH_RECOGNIZE output) in the FROM scope.
+   *
+   * Derived tables are always keyed by their alias (or a synthetic UUID name
+   * when unaliased). They propagate `inheritedDatasetInputs` to the enclosing
+   * scope so that WHERE/JOIN/GROUP BY columns referenced inside the subquery
+   * body correctly appear in the outer query’s dataset-level inputs.
    */
   private registerDerived(
     aliasOrName: string,
@@ -1124,7 +1319,13 @@ export class ColumnLevelLineage {
   // Join criteria collection
   // ════════════════════════════════════════════════════════════
 
-  /** Walks the relation tree collecting dataset-level deps from JOIN ON/USING. */
+  /**
+   * Walks the relation tree collecting dataset-level deps from JOIN ON/USING.
+   *
+   * JOIN criteria columns are dataset-level inputs (not attributable to a single
+   * output column) because they affect which rows appear in the result rather
+   * than computing a specific output value.
+   */
   private collectJoinCriteria(rel: RelationContext, target: InputField[]): void {
     if (rel instanceof JoinRelationContext) {
       const criteria = rel.joinCriteria();
@@ -1133,6 +1334,12 @@ export class ColumnLevelLineage {
     }
   }
 
+  /**
+   * Resolves JOIN USING columns by looking up the column name in every distinct
+   * table in the current scope. Unlike ON clauses (arbitrary boolean expressions),
+   * USING references a column that must exist in both sides of the join, so we
+   * attribute it to every table that has it.
+   */
   private appendJoinCriteriaInputs(ctx: JoinCriteriaContext, target: InputField[]): void {
     if (ctx.USING()) {
       const scope = this.currentScope;
@@ -1159,6 +1366,11 @@ export class ColumnLevelLineage {
   // Input dataset registry
   // ════════════════════════════════════════════════════════════
 
+  /**
+   * Records a dataset as an input (upstream dependency).
+   * Uses a null-byte separator in the dedup key to avoid collisions between
+   * namespace and name segments (e.g. namespace="a" name="b" vs namespace="a\0" name="b").
+   */
   private registerInputDataset(ref: DatasetRef): void {
     const key = `${ref.namespace}\u0000${ref.name}`;
     if (!this.inputDatasets.has(key)) {
@@ -1171,6 +1383,11 @@ export class ColumnLevelLineage {
 // Internal: locate the top-level QueryContext in a parsed statement.
 // ════════════════════════════════════════════════════════════════
 
+/**
+ * Recursively searches the parse tree for the first QueryContext node.
+ * The Trino grammar wraps the query in statement-level nodes, so this
+ * DFS finds the actual query body regardless of the top-level statement type.
+ */
 function findRootQuery(node: ParserRuleContext): QueryContext | undefined {
   if (node instanceof QueryContext) return node;
   if (node.children) {

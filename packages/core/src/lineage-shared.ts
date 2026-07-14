@@ -1,15 +1,5 @@
 import { normalizeId, NormalizedIdBrand } from "./utils.js";
-
-// ════════════════════════════════════════════════════════════════
-// Public Types
-// ════════════════════════════════════════════════════════════════
-
-/** Metadata describing a table available in the query namespace. */
-export interface TableMetadata {
-  tableName: string;
-  tableSchema?: string;
-  columns: string[];
-}
+import { TableMetadata } from "./types.js";
 
 // ════════════════════════════════════════════════════════════════
 // Internal Shared Types

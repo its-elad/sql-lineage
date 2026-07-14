@@ -1268,11 +1268,13 @@ describe("Same-name columns from multiple tables", () => {
     const r = run(`SELECT id FROM users u JOIN orders o ON u.id = o.user_id`, [USERS, ORDERS]);
     // ambiguous → empty inputs for the output column
     expect(fields(r)["id"]!.length).toBe(0);
+    expect(r.unresolvedTableColumns).toContainEqual({ column: "id" });
   });
 
   test("unqualified ambiguous 'status' in SELECT — empty", () => {
     const r = run(`SELECT status FROM users u JOIN orders o ON u.id = o.user_id`, [USERS, ORDERS]);
     expect(fields(r)["status"]!.length).toBe(0);
+    expect(r.unresolvedTableColumns).toContainEqual({ column: "status" });
   });
 
   test("unqualified ambiguous 'id' in WHERE — still tracked in dataset", () => {
@@ -1283,6 +1285,12 @@ describe("Same-name columns from multiple tables", () => {
     // WHERE ambiguous ref → drops (no contribution to dataset for ambiguous)
     // But JOIN ON still contributes
     expectSetEqual(dataset(r), [inp("users", "id"), inp("orders", "user_id")]);
+  });
+
+  test("completely unknown bare column — recorded in unresolvedTableColumns", () => {
+    const r = run(`SELECT nonexistent FROM users u`, [USERS]);
+    expect(fields(r)["nonexistent"]!.length).toBe(0);
+    expect(r.unresolvedTableColumns).toContainEqual({ column: "nonexistent" });
   });
 
   // Unqualified unambiguous references
@@ -2262,6 +2270,7 @@ describe("Additional Edge Cases", () => {
           },
         },
       ],
+      unresolvedTableColumns: [],
     });
   });
 
@@ -2295,6 +2304,7 @@ describe("Additional Edge Cases", () => {
           },
         },
       ],
+      unresolvedTableColumns: [],
     });
   });
 });

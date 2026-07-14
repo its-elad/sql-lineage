@@ -187,8 +187,14 @@ interface ColumnLevelLineageOptions {
 
 ```typescript
 interface ColumnLevelLineageResult {
-  inputs: DatasetRef[];          // All upstream datasets, sorted by namespace then name
-  outputs: DatasetWithFacets[];  // Always exactly one entry (the output dataset)
+  inputs: DatasetRef[];                              // All upstream datasets, sorted by namespace then name
+  outputs: DatasetWithFacets[];                      // Always exactly one entry (the output dataset)
+  unresolvedTableColumns: UnresolvedColumnReference[];  // Columns that could not be resolved
+}
+
+interface UnresolvedColumnReference {
+  table?: string;  // Set when table was identified but column couldn't be confirmed
+  column: string;  // The unresolved column name
 }
 
 interface DatasetRef {
@@ -245,7 +251,8 @@ Inputs are sorted by namespace, then by name.
 
 | Scenario | Behavior |
 |----------|----------|
-| **Ambiguous bare column** (exists in multiple tables at same scope) | Dropped silently — `inputFields` will be empty for that column |
+| **Ambiguous bare column** (exists in multiple tables at same scope) | Recorded in `unresolvedColumns`; `inputFields` will be empty for that column |
+| **Bare column not found in any table** | Recorded in `unresolvedColumns` |
 | **CTE / derived table columns** | Transparent — traced through to the underlying physical table |
 | **Literal expressions** (e.g. `SELECT 1 AS one`) | No inputFields (empty array) — no source column to attribute |
 | **Function calls with no column args** (e.g. `NOW()`) | No inputFields |
@@ -292,7 +299,7 @@ Input fields within each output column are deduplicated by `(namespace, name, fi
 | **Dataset-level tracking** | No distinction — all references go into the same bucket | Yes — WHERE/JOIN/GROUP BY go into a separate `dataset` array |
 | **Namespace support** | None | Full OpenLineage namespace model |
 | **Unknown tables** | Reported in `unresolvedTableColumns` | Still appear in `inputs` and `inputFields` |
-| **Unresolved columns** | Explicitly collected in `unresolvedTableColumns` | Silently dropped (empty `inputFields`) |
+| **Unresolved columns** | Collected in `unresolvedTableColumns` | Collected in `unresolvedColumns` |
 | **CTE/derived handling** | Transparent (dropped from output) | Transparent (traced through to physical tables, dataset deps inherited) |
 | **Architecture** | ANTLR visitor pattern (`SqlBaseVisitor`) | Manual recursive tree walker (no visitor base class) |
 | **Subquery column origins** | Inferred for scope resolution but not tracked in output | Fully tracked — subquery/CTE column origins flow through to the outer query |
