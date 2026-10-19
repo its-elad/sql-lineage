@@ -1,0 +1,283 @@
+/* ────────────────────────────────────────────────────────────────
+   Floating Action Button
+   ──────────────────────────────────────────────────────────────── */
+
+.lineage-fab {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 1000;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  border: none;
+  background: #0e639c;
+  color: #fff;
+  font-size: 1.8rem;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s, transform 0.2s;
+}
+
+.lineage-fab:hover {
+  background: #1177bb;
+  transform: scale(1.08);
+}
+
+.lineage-fab:active {
+  transform: scale(0.95);
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Modal
+   ──────────────────────────────────────────────────────────────── */
+
+.lineage-modal__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: lineage-fade-in 0.15s ease-out;
+}
+
+.lineage-modal__content {
+  width: 90vw;
+  height: 85vh;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  animation: lineage-scale-in 0.15s ease-out;
+}
+
+.lineage-modal__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+}
+
+.lineage-modal__title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #cccccc;
+}
+
+.lineage-modal__mode-badge {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: #0e639c;
+  color: #fff;
+}
+
+.lineage-modal__close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #858585;
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.lineage-modal__close:hover {
+  background: #3c3c3c;
+  color: #fff;
+}
+
+.lineage-modal__body {
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Graph Container
+   ──────────────────────────────────────────────────────────────── */
+
+.lineage-graph {
+  width: 100%;
+  height: 100%;
+}
+
+.lineage-graph__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #858585;
+  text-align: center;
+}
+
+.lineage-graph__empty p {
+  margin: 4px 0;
+}
+
+.lineage-graph__empty-hint {
+  font-size: 0.8rem;
+  color: #666;
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Table Node
+   ──────────────────────────────────────────────────────────────── */
+
+.lineage-node {
+  min-width: 180px;
+  max-width: 260px;
+  background: #2d2d2d;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  color: #d4d4d4;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.lineage-node--output {
+  border-color: #0e639c;
+  background: #1a2a3a;
+}
+
+.lineage-node__header {
+  padding: 8px 12px;
+  font-weight: 600;
+  font-size: 0.8rem;
+  background: #333;
+  border-bottom: 1px solid #4a4a4a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lineage-node--output .lineage-node__header {
+  background: #0e639c;
+  color: #fff;
+  border-bottom-color: #1177bb;
+}
+
+.lineage-node__columns {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.lineage-node__column {
+  padding: 2px 12px;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.7rem;
+  color: #9cdcfe;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.lineage-node__column-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lineage-node__column:hover {
+  background: #3c3c3c;
+}
+
+/* Per-column handles — small dots aligned to each column row */
+.lineage-node__handle--column {
+  width: 6px;
+  height: 6px;
+  background: #4ec9b0;
+  border: 1px solid #333;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.lineage-node__handle--column[data-handlepos="left"] {
+  left: -3px;
+}
+
+.lineage-node__handle--column[data-handlepos="right"] {
+  right: -3px;
+}
+
+/* Node-level handles — larger, used for dataset-level edges */
+.lineage-node__handle--node {
+  width: 8px;
+  height: 8px;
+  background: #f59e0b;
+  border: 1px solid #333;
+}
+
+/* ────────────────────────────────────────────────────────────────
+   React Flow overrides (dark theme)
+   ──────────────────────────────────────────────────────────────── */
+
+.lineage-graph .react-flow__edge-path {
+  stroke: #666;
+  stroke-width: 1.5;
+}
+
+.lineage-graph .react-flow__controls {
+  background: #2d2d2d;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+}
+
+.lineage-graph .react-flow__controls-button {
+  background: #2d2d2d;
+  border-bottom: 1px solid #3c3c3c;
+  color: #ccc;
+  fill: #ccc;
+}
+
+.lineage-graph .react-flow__controls-button:hover {
+  background: #3c3c3c;
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Animations
+   ──────────────────────────────────────────────────────────────── */
+
+@keyframes lineage-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes lineage-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

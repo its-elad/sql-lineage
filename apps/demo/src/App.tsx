@@ -1,7 +1,12 @@
-import { useCallback, useState } from "react";
-import Editor, { type EditorProps } from "@monaco-editor/react";
-import { getColumnLineage, getUpstreamTables, type TableMetadata } from "@sql-lineage/core";
+import { useCallback, useRef, useState } from "react";
+import Editor, { type EditorProps, type Monaco } from "@monaco-editor/react";
+import { getColumnLineage, getColumnLevelLineage, getUpstreamTables, type TableMetadata } from "@sql-lineage/core";
+import { LineageGraphModal } from "./lineage-graph";
+import type { LineageModeResult } from "./lineage-graph";
+import "./lineage-graph/lineage-graph.css";
 import "./App.css";
+
+type AnalysisMode = "column-lineage" | "column-level-lineage" | "upstream-tables";
 
 const DEFAULT_SQL = `WITH order_summary AS (
   SELECT
@@ -57,15 +62,41 @@ const DEFAULT_NAMESPACE_METADATA: TableMetadata[] = [
   { tableName: "suppliers", columns: ["supplier_id", "supplier_name", "country", "status"] },
 ];
 
-function computeLineage(
-  ...params: Parameters<typeof getColumnLineage>
-): { columns: unknown; tables: unknown } | string {
+function computeLineage(mode: AnalysisMode, sql: string, metadata: TableMetadata[]): LineageModeResult | string {
   try {
-    return { tables: getUpstreamTables(params[0]), columns: getColumnLineage(...params) };
+    switch (mode) {
+      case "column-lineage":
+        return getColumnLineage(sql, metadata);
+      case "column-level-lineage":
+        return getColumnLevelLineage(sql, metadata, { defaultNamespace: "demo", outputName: "demo_output" });
+      case "upstream-tables":
+        return getUpstreamTables(sql);
+    }
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
 }
+
+const METADATA_SCHEMA_URI = "schema://sql-lineage/table-metadata.json";
+
+const TABLE_METADATA_SCHEMA = {
+  $id: METADATA_SCHEMA_URI,
+  type: "array",
+  items: {
+    type: "object",
+    required: ["tableName", "columns"],
+    additionalProperties: false,
+    properties: {
+      tableName: { type: "string", description: "Name of the table" },
+      tableSchema: { type: "string", description: "Optional schema qualifier (e.g. 'public')" },
+      columns: {
+        type: "array",
+        items: { type: "string" },
+        description: "List of column names in the table",
+      },
+    },
+  },
+};
 
 const EDITOR_OPTIONS: EditorProps["options"] = {
   minimap: { enabled: false },
@@ -77,18 +108,58 @@ const EDITOR_OPTIONS: EditorProps["options"] = {
 export default function App() {
   const [sql, setSql] = useState(DEFAULT_SQL);
   const [namespaceMetadata, setNamespaceMetadata] = useState(DEFAULT_NAMESPACE_METADATA);
+  const [metadataText, setMetadataText] = useState(() => JSON.stringify(DEFAULT_NAMESPACE_METADATA, null, 2));
+  const [mode, setMode] = useState<AnalysisMode>("column-lineage");
+  const [graphOpen, setGraphOpen] = useState(false);
+  const schemaRegistered = useRef(false);
 
   const handleSqlChange = useCallback((value: string | undefined) => {
     setSql(value ?? "");
   }, []);
 
+  const handleMetadataEditorBeforeMount = useCallback((monaco: Monaco) => {
+    if (schemaRegistered.current) return;
+    schemaRegistered.current = true;
+    monaco.languages.json.jsonDefaults.setDiagnosticsOptions({
+      validate: true,
+      schemas: [
+        {
+          uri: METADATA_SCHEMA_URI,
+          fileMatch: ["metadata.json"],
+          schema: TABLE_METADATA_SCHEMA,
+        },
+      ],
+    });
+  }, []);
+
   // const rawParseTree = safeSerialize(sql);
-  const lineage = JSON.stringify(computeLineage(sql, namespaceMetadata), null, 2);
+  const lineageResult = computeLineage(mode, sql, namespaceMetadata);
+  const lineage = JSON.stringify(lineageResult, null, 2);
 
   return (
     <div className="app">
       <header className="app-header">
         <h1>SQL Lineage Explorer</h1>
+        <div className="mode-switcher">
+          <button
+            className={mode === "column-lineage" ? "mode-btn active" : "mode-btn"}
+            onClick={() => setMode("column-lineage")}
+          >
+            Column Lineage
+          </button>
+          <button
+            className={mode === "column-level-lineage" ? "mode-btn active" : "mode-btn"}
+            onClick={() => setMode("column-level-lineage")}
+          >
+            Column-Level Lineage
+          </button>
+          <button
+            className={mode === "upstream-tables" ? "mode-btn active" : "mode-btn"}
+            onClick={() => setMode("upstream-tables")}
+          >
+            Upstream Tables
+          </button>
+        </div>
       </header>
       <div className="panels">
         <section className="panel">
@@ -111,10 +182,14 @@ export default function App() {
             <Editor
               height="100%"
               defaultLanguage="json"
-              value={JSON.stringify(namespaceMetadata, null, 2)}
+              path="metadata.json"
+              value={metadataText}
+              beforeMount={handleMetadataEditorBeforeMount}
               onChange={(value) => {
+                const text = value ?? "";
+                setMetadataText(text);
                 try {
-                  setNamespaceMetadata(JSON.parse(value ?? ""));
+                  setNamespaceMetadata(JSON.parse(text));
                 } catch {}
               }}
               theme="vs-dark"
@@ -136,6 +211,22 @@ export default function App() {
           </div>
         </section>
       </div>
+
+      <button
+        className="lineage-fab"
+        onClick={() => setGraphOpen(true)}
+        title="Visualize lineage graph"
+        aria-label="Open lineage graph"
+      >
+        ⬡
+      </button>
+
+      <LineageGraphModal
+        isOpen={graphOpen}
+        onClose={() => setGraphOpen(false)}
+        mode={mode}
+        result={lineageResult}
+      />
     </div>
   );
 }
